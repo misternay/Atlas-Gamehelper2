@@ -1,0 +1,64 @@
+name: Build and Deploy (minimal zip)
+
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        run: dotnet restore Atlas.sln
+
+      - name: Set build version from tag
+        shell: pwsh
+        run: |
+          $v = "${{ github.ref_name }}" -replace '^v',''
+          "VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build (Release) to known folder
+        run: dotnet build Atlas.csproj -c Release --no-restore -p:Version=$env:VERSION -o build
+
+      - name: Stage minimal files (Atlas.dll + json)
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "build\Atlas.dll")) { throw "Atlas.dll not found in .\build" }
+
+          New-Item -ItemType Directory -Path "package" -Force | Out-Null
+          Copy-Item -Path "build\Atlas.dll" -Destination "package\Atlas.dll" -Force
+
+          if (Test-Path "build\json") {
+            Copy-Item -Path "build\json" -Destination "package\json" -Recurse -Force
+          } elseif (Test-Path "json") {
+            Copy-Item -Path "json" -Destination "package\json" -Recurse -Force
+          } else {
+            Write-Host "No json folder found; continuing with Atlas.dll only."
+          }
+
+          Write-Host "Packaged contents:"
+          Get-ChildItem -Recurse package | ForEach-Object { $_.FullName }
+
+      - name: Zip
+        shell: pwsh
+        run: Compress-Archive -Path "package\*" -DestinationPath "Atlas-${{ github.ref_name }}.zip"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Atlas-${{ github.ref_name }}
+          files: ${{ github.workspace }}/Atlas-${{ github.ref_name }}.zip
+          generate_release_notes: true
