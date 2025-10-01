@@ -7,7 +7,6 @@
     using ImGuiNET;
     using Newtonsoft.Json;
     using System;
-    using System.Collections;
     using System.Collections.Generic;
     using System.Diagnostics;
     using System.Drawing;
@@ -254,15 +253,24 @@
             var atlasCount = atlasUi.Length;
             if (!atlasUi.IsVisible || atlasUi.FirstChild == IntPtr.Zero || atlasCount <= 0 || atlasCount > 10000) return;
 
-            var towers = Settings.MapGroups.Where(g => g.Name == "Towers").SelectMany(g => g.Maps).ToList();
+            var towers = new HashSet<string>(
+                Settings.MapGroups
+                    .Where(tower => string.Equals(tower.Name, "Towers", StringComparison.OrdinalIgnoreCase))
+                    .SelectMany(tower => tower.Maps)
+                    .Select(NormalizeName),
+                StringComparer.OrdinalIgnoreCase);
             var boundsTowers = calculateBounds(Settings.DrawTowersInRange);
 
             var searchQuery = NormalizeName(Settings.SearchQuery);
             bool doSearch = !string.IsNullOrWhiteSpace(searchQuery);
-            List<string> searchList = new List<string>();
+            List<string> searchList = new();
             if (doSearch)
             {
-                searchList = searchQuery.Split(',').Where(s => !string.IsNullOrWhiteSpace(s)).ToList();
+                searchList = searchQuery
+                    .Split(',', StringSplitOptions.RemoveEmptyEntries)
+                    .Select(NormalizeName)
+                    .Where(s => !string.IsNullOrWhiteSpace(s))
+                    .ToList();
             }
             var boundsSearch = calculateBounds(Settings.DrawSearchInRange);
 
@@ -309,16 +317,17 @@
                 drawList.AddRectFilled(bgPos, bgPos + bgSize, ImGuiHelper.Color(backgroundColor));
                 drawList.AddText(drawPosition, ImGuiHelper.Color(fontColor), mapName);
 
-                if (Settings.DrawLinesToCitadel && mapName.EndsWith("Citadel", StringComparison.Ordinal))
+                if (Settings.DrawLinesToCitadel && mapName.EndsWith("Citadel", StringComparison.OrdinalIgnoreCase))
                 {
                     drawList.AddLine(playerLocation, drawPosition, CitadelLineColor);
-                    continue;
                 }
 
-                if (Settings.DrawLinesToTowers && towers.Contains(mapName) && boundsTowers.Contains(new PointF(drawPosition.X, drawPosition.Y)))
+                if (Settings.DrawLinesToTowers
+                    && towers.Contains(mapName)
+                    && !atlasNode.IsCompleted
+                    && boundsTowers.Contains(new PointF(drawPosition.X, drawPosition.Y)))
                 {
                     drawList.AddLine(playerLocation, drawPosition, TowerLineColor);
-                    continue;
                 }
 
                 if (Settings.DrawLinesSearchQuery && doSearch && searchList.Any(searchTerm => mapName.Contains(searchTerm, StringComparison.OrdinalIgnoreCase)) && boundsSearch.Contains(new PointF(drawPosition.X, drawPosition.Y)))
@@ -387,7 +396,11 @@
             for (int i = 0; i < infos.Count; i++)
             {
                 var info = infos[i];
-                var abbrev = string.IsNullOrWhiteSpace(info.Abbrev) ? info.Label[..1] : info.Abbrev;
+                string abbrev;
+                if (string.IsNullOrWhiteSpace(info.Abbrev))
+                    abbrev = !string.IsNullOrEmpty(info.Label) ? info.Label.Substring(0, 1) : "?";
+                else
+                    abbrev = info.Abbrev;
                 var boxSize = new Vector2(widths[i], fixedHeight);
                 var squareMin = basePos;
                 var squareMax = squareMin + boxSize;
@@ -507,7 +520,30 @@
         }
 
         private static string NormalizeName(string s) =>
-            string.IsNullOrEmpty(s) ? s : s.Replace('\u00A0', ' ').Trim();
+            string.IsNullOrWhiteSpace(s)
+                ? s
+                : CollapseWhitespace(s.Replace('\u00A0', ' ').Trim());
+
+        private static string CollapseWhitespace(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return s;
+            var sb = new StringBuilder(s.Length);
+            bool prevSpace = false;
+            foreach (var ch in s)
+            {
+                bool isSpace = char.IsWhiteSpace(ch);
+                if (isSpace)
+                {
+                    if (!prevSpace) sb.Append(' ');
+                }
+                else
+                {
+                    sb.Append(ch);
+                }
+                prevSpace = isSpace;
+            }
+            return sb.ToString();
+        }
 
         private UiElement GetAtlasPanelUi()
         {
@@ -584,21 +620,35 @@
             Dictionary<string, ContentInfo> tagMap,
             Dictionary<string, ContentInfo> plainMap)
         {
-            if (string.IsNullOrEmpty(contentName)) return null;
+            if (string.IsNullOrWhiteSpace(contentName)) return null;
 
             var normalized = contentName.Replace("\u00A0", " ").Trim();
 
-            int start = normalized.IndexOf('[');
-            int sep = normalized.IndexOf('|');
-            if (start >= 0 && sep > start)
+            int lb = normalized.IndexOf('[');
+            int rb = lb >= 0 ? normalized.IndexOf(']', lb + 1) : -1;
+            if (lb >= 0 && rb > lb + 1)
             {
-                string tag = normalized.Substring(start + 1, sep - start - 1);
-                if (tagMap.TryGetValue(tag, out var info)) return info;
+                var inside = normalized.Substring(lb + 1, rb - lb - 1);
+                var pipe = inside.IndexOf('|');
+                var tag = (pipe >= 0 ? inside[..pipe] : inside).Trim();
+
+                if (tagMap.TryGetValue(tag, out var tagInfo))
+                    return tagInfo;
+
+                if (plainMap.TryGetValue(tag, out var tagAsPlain))
+                    return tagAsPlain;
             }
 
-            foreach (var kvp in plainMap)
+            foreach (var map in plainMap)
             {
-                if (normalized.Contains(kvp.Key, StringComparison.OrdinalIgnoreCase)) return kvp.Value;
+                if (normalized.Contains(map.Key, StringComparison.OrdinalIgnoreCase))
+                    return map.Value;
+            }
+
+            foreach (var tag in tagMap)
+            {
+                if (normalized.Contains(tag.Key, StringComparison.OrdinalIgnoreCase))
+                    return tag.Value;
             }
 
             return null;
