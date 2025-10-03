@@ -51,11 +51,10 @@ namespace Atlas
         public readonly float Scale => Zoom / 1.5f;
         public readonly Vector2 Position => RelativePosition * Scale;
 
-        public readonly bool IsAttempted => Flags.HasFlag(AtlasNodeState.Attempted);
-        public readonly bool IsPristine => Flags.HasFlag(AtlasNodeState.Pristine);
-        public readonly bool IsWatchTower => Flags.HasFlag(AtlasNodeState.WatchTower);
-        public readonly bool IsCompleted => IsAttempted && IsPristine;
-        public readonly bool IsFailedAttempt => IsAttempted && !IsPristine;
+        public readonly bool IsAccessible => Flags.HasFlag(AtlasNodeState.AccessibleNow);
+        public readonly bool IsNotAccessible => !IsAccessible;
+        public readonly bool IsCompleted => Flags.HasFlag(AtlasNodeState.CompletedBase);
+        public static bool IsFailedAttempt => false;
 
         public readonly string MapName
         {
@@ -73,9 +72,9 @@ namespace Atlas
     [Flags]
     public enum AtlasNodeState : ushort
     {
-        None = 0,
-        Attempted = 1 << 0,
-        Pristine = 1 << 1,
-        WatchTower = 1 << 2
+        None                = 0x0000,
+
+        AccessibleNow       = 0x0001,
+        CompletedBase       = 0x0002,
     }
 }

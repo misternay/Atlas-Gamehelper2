@@ -10,9 +10,10 @@ namespace Atlas
         public Vector4 DefaultFontColor = new(1.0f, 1.0f, 1.0f, 1.0f);
         public bool ControllerMode = false;
         public string SearchQuery = string.Empty;
-        public bool DrawLinesSearchQuery = false;
+        public bool DrawLinesSearchQuery = true;
         public float DrawSearchInRange = 1.3f;
         public bool HideCompletedMaps = true;
+        public bool HideNotAccessibleMaps = false;
         public bool HideFailedMaps = true;
         public float ScaleMultiplier = 1.0f;
         public bool DrawLinesToCitadel = false;
@@ -22,7 +23,7 @@ namespace Atlas
         public string GroupNameInput = string.Empty;
         public float XSlider = 1500.0f;
         public float YSlider = 1512.0f;
-        public bool ShowMapBadges = false;
+        public bool ShowMapBadges = true;
         public Dictionary<string, ContentOverride> ContentOverrides = [];
 
         public AtlasSettings()

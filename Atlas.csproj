@@ -26,12 +26,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Update="json\content.json">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-  </ItemGroup>
-
-  <ItemGroup>
     <Reference Include="GameHelper">
       <HintPath>Libs\GameHelper.dll</HintPath>
       <Private>False</Private>
@@ -42,6 +36,12 @@
       <Private>False</Private>
       <CopyLocalSatelliteAssemblies>False</CopyLocalSatelliteAssemblies>
     </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="json\content.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
 </Project>

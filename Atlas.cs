@@ -82,6 +82,10 @@
             ImGui.SameLine(); ImGui.Text("Show Map Badges");
             ImGui.Checkbox("##HideCompletedMaps", ref Settings.HideCompletedMaps);
             ImGui.SameLine(); ImGui.Text("Hide Completed Maps");
+
+            ImGui.Checkbox("##HideNotAccessibleMaps", ref Settings.HideNotAccessibleMaps);
+            ImGui.SameLine(); ImGui.Text("Hide Not Accessible Maps");
+
             ImGui.Separator();
 
             ImGui.SliderFloat("##ScaleMultiplier", ref Settings.ScaleMultiplier, 0.5f, 2.0f);
@@ -259,7 +263,7 @@
                     .SelectMany(tower => tower.Maps)
                     .Select(NormalizeName),
                 StringComparer.OrdinalIgnoreCase);
-            var boundsTowers = calculateBounds(Settings.DrawTowersInRange);
+            var boundsTowers = CalculateBounds(Settings.DrawTowersInRange);
 
             var searchQuery = NormalizeName(Settings.SearchQuery);
             bool doSearch = !string.IsNullOrWhiteSpace(searchQuery);
@@ -272,7 +276,7 @@
                     .Where(s => !string.IsNullOrWhiteSpace(s))
                     .ToList();
             }
-            var boundsSearch = calculateBounds(Settings.DrawSearchInRange);
+            var boundsSearch = CalculateBounds(Settings.DrawSearchInRange);
 
             var playerLocation = Core.States.InGameStateObject.CurrentWorldInstance.WorldToScreen(playerRender.WorldPosition);
 
@@ -291,7 +295,10 @@
                 if (doSearch && !searchList.Any(searchTerm => mapName.Contains(searchTerm, StringComparison.OrdinalIgnoreCase)))
                     continue;
 
-                if (Settings.HideCompletedMaps && (atlasNode.IsCompleted || (mapName.EndsWith("Citadel") && atlasNode.IsFailedAttempt))) 
+                if (Settings.HideCompletedMaps && (atlasNode.IsCompleted || (mapName.EndsWith("Citadel") && AtlasNode.IsFailedAttempt))) 
+                    continue;
+
+                if (Settings.HideNotAccessibleMaps && atlasNode.IsNotAccessible)
                     continue;
 
                 var rawContents = GetContentName(nodeUi);
@@ -678,7 +685,7 @@
                    Math.Abs(a.W - b.W) < eps;
         }
 
-        private static RectangleF calculateBounds(float range)
+        private static RectangleF CalculateBounds(float range)
         {
             var baseBoundsTowers = new RectangleF(0, 0, ImGui.GetIO().DisplaySize.X, ImGui.GetIO().DisplaySize.Y);
             return RectangleF.Inflate(baseBoundsTowers, baseBoundsTowers.Width * (range - 1.0f), baseBoundsTowers.Height * (range - 1.0f));
