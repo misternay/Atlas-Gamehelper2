@@ -320,13 +320,16 @@
                 var padding = new Vector2(5, 2);
                 var bgPos = drawPosition - padding;
                 var bgSize = textSize + padding * 2;
+                var rectCenter = (bgPos + (bgPos + bgSize)) * 0.5f;
+                var intersectionPoint = GetLineRectangleIntersection(playerLocation, rectCenter, bgPos, bgPos + bgSize);
 
-                drawList.AddRectFilled(bgPos, bgPos + bgSize, ImGuiHelper.Color(backgroundColor));
+                drawList.AddRect(bgPos, bgPos + bgSize, ImGuiHelper.Color(fontColor), 3f, ImDrawFlags.RoundCornersAll, 1f);
+                drawList.AddRectFilled(bgPos, bgPos + bgSize, ImGuiHelper.Color(backgroundColor), 3f);
                 drawList.AddText(drawPosition, ImGuiHelper.Color(fontColor), mapName);
 
                 if (Settings.DrawLinesToCitadel && mapName.EndsWith("Citadel", StringComparison.OrdinalIgnoreCase))
                 {
-                    drawList.AddLine(playerLocation, drawPosition, CitadelLineColor);
+                    drawList.AddLine(playerLocation, intersectionPoint, CitadelLineColor);
                 }
 
                 if (Settings.DrawLinesToTowers
@@ -334,12 +337,14 @@
                     && !atlasNode.IsCompleted
                     && boundsTowers.Contains(new PointF(drawPosition.X, drawPosition.Y)))
                 {
-                    drawList.AddLine(playerLocation, drawPosition, TowerLineColor);
+                    drawList.AddLine(playerLocation, intersectionPoint, TowerLineColor);
                 }
 
-                if (Settings.DrawLinesSearchQuery && doSearch && searchList.Any(searchTerm => mapName.Contains(searchTerm, StringComparison.OrdinalIgnoreCase)) && boundsSearch.Contains(new PointF(drawPosition.X, drawPosition.Y)))
+                if (Settings.DrawLinesSearchQuery
+                    && doSearch && searchList.Any(searchTerm => mapName.Contains(searchTerm, StringComparison.OrdinalIgnoreCase))
+                    && boundsSearch.Contains(new PointF(drawPosition.X, drawPosition.Y)))
                 {
-                    drawList.AddLine(playerLocation, drawPosition, SearchLineColor);
+                    drawList.AddLine(playerLocation, intersectionPoint, SearchLineColor);
                 }
 
                 float labelCenterX = drawPosition.X + textSize.X * 0.5f;
@@ -422,6 +427,42 @@
             }
 
             nextRowTopY += fixedHeight + rowGap;
+        }
+        private static Vector2 GetLineRectangleIntersection(Vector2 lineStart, Vector2 rectCenter, Vector2 rectMin, Vector2 rectMax)
+        {
+            if (lineStart.X >= rectMin.X && lineStart.X <= rectMax.X &&
+                lineStart.Y >= rectMin.Y && lineStart.Y <= rectMax.Y)
+            {
+                return lineStart;
+            }
+
+            Vector2 direction = rectCenter - lineStart;
+
+            float dirX = direction.X == 0 ? 1e-6f : direction.X;
+            float dirY = direction.Y == 0 ? 1e-6f : direction.Y;
+
+            float tMinX = (rectMin.X - lineStart.X) / dirX;
+            float tMaxX = (rectMax.X - lineStart.X) / dirX;
+            float tMinY = (rectMin.Y - lineStart.Y) / dirY;
+            float tMaxY = (rectMax.Y - lineStart.Y) / dirY;
+
+            if (tMinX > tMaxX) {
+                (tMaxX, tMinX) = (tMinX, tMaxX);
+            }
+            if (tMinY > tMaxY) {
+                (tMaxY, tMinY) = (tMinY, tMaxY);
+            }
+
+            float tEnter = Math.Max(tMinX, tMinY);
+            float tExit = Math.Min(tMaxX, tMaxY);
+
+            if (tEnter > tExit || tEnter < 0)
+            {
+                return rectCenter;
+            }
+
+            float t = Math.Min(tEnter, 1.0f);
+            return lineStart + direction * t;
         }
 
         private void MoveMapGroup(int index, int direction)
