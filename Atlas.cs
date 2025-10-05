@@ -18,9 +18,13 @@
 
     public sealed class Atlas : PCore<AtlasSettings>
     {
-        private const uint CitadelLineColor = 0xFF0000FF;
-        private const uint TowerLineColor = 0xFFC6C10D;
-        private const uint SearchLineColor = 0xFFFFFFFF;
+        private const uint CitadelLineColor = 0xFF0000FF; // red
+        private const uint TowerLineColor = 0xFFC6C10D; // yellow
+        private const uint SearchLineColor = 0xFFFFFFFF; // white
+        private const uint ShortestPathColor = 0xFF00FFFF; // cyan highlight
+
+        // Base neighbor threshold kept as a fallback (shouldn't be needed with true graph).
+        private const float BaseNeighborThresholdPx = 120f;
 
         private string SettingPathname => Path.Join(DllDirectory, "config", "settings.txt");
         private string NewGroupName = string.Empty;
@@ -31,9 +35,20 @@
         public static IntPtr Handle { get; set; }
         private static int _handlePid;
 
-        public override void OnDisable() 
+        // Cache: (startNodeIndex, targetNodeIndex) -> node-index path
+        private readonly Dictionary<(int start, int target), List<int>> _pathCacheNodes = new();
+
+        private string _lastSearchQuery = null;
+        private bool _wasAtlasVisible = false;
+        private int _lastStartIdx = -1; // nearest node to mouse last frame
+
+        public override void OnDisable()
         {
             CloseAndResetHandle();
+            _pathCacheNodes.Clear();
+            _lastSearchQuery = null;
+            _wasAtlasVisible = false;
+            _lastStartIdx = -1;
         }
 
         public override void OnEnable(bool isGameOpened)
@@ -62,8 +77,7 @@
         {
             #region SettingsUI
             ImGui.Checkbox("##ControllerMode", ref Settings.ControllerMode);
-            ImGui.SameLine(); 
-            ImGui.Text("Use Controller Mode");
+            ImGui.SameLine(); ImGui.Text("Use Controller Mode");
             ImGui.Separator();
 
             ImGui.Text("You can search for multiple maps at once. To do this, separate them with a comma ','");
@@ -71,11 +85,26 @@
             ImGui.SameLine();
             ImGui.Checkbox("Draw Lines##DrawLineSearchQuery", ref Settings.DrawLinesSearchQuery);
             ImGui.SameLine();
-            if (ImGui.SmallButton("Clear##AtlasSearchClear")) 
+            if (ImGui.SmallButton("Clear##AtlasSearchClear"))
                 Settings.SearchQuery = string.Empty;
             ImGui.SliderFloat("##DrawSearchInRange", ref Settings.DrawSearchInRange, 1.0f, 10.0f);
-            ImGui.SameLine();
-            ImGui.Text("Draw Lines to Search in range");
+            ImGui.SameLine(); ImGui.Text("Draw Lines to Search in range");
+
+            ImGui.Separator();
+
+            // Max path nodes (path length limit in nodes)
+            int maxNodes = Settings.MaxPathNodes;
+            if (ImGui.InputInt("Max path nodes", ref maxNodes))
+            {
+                if (maxNodes < 1) maxNodes = 1;
+                if (maxNodes > 5000) maxNodes = 5000;
+                if (maxNodes != Settings.MaxPathNodes)
+                {
+                    Settings.MaxPathNodes = maxNodes;
+                    _pathCacheNodes.Clear();
+                }
+            }
+
             ImGui.Separator();
 
             ImGui.Checkbox("##ShowMapBadges", ref Settings.ShowMapBadges);
@@ -149,12 +178,10 @@
             ImGui.Separator();
 
             ImGui.Checkbox("##DrawLinesToCitadel", ref Settings.DrawLinesToCitadel);
-            ImGui.SameLine();
-            ImGui.Text("Draw Lines to Citadels");
+            ImGui.SameLine(); ImGui.Text("Draw Lines to Citadels");
 
             ImGui.Checkbox("##DrawLinesToTowers", ref Settings.DrawLinesToTowers);
-            ImGui.SameLine();
-            ImGui.Text("Draw Lines to Towers in range");
+            ImGui.SameLine(); ImGui.Text("Draw Lines to Towers in range");
             ImGui.SameLine();
             ImGui.SliderFloat("##DrawTowersInRange", ref Settings.DrawTowersInRange, 1.0f, 10.0f);
 
@@ -174,30 +201,16 @@
                 if (ImGui.CollapsingHeader($"{mapGroup.Name}##MapGroup{i}"))
                 {
                     float buttonSize = ImGui.GetFrameHeight();
-                    if (TriangleButton($"##Up{i}", buttonSize, new Vector4(1, 1, 1, 1), true)) 
-                    { 
-                        MoveMapGroup(i, -1); 
-                    }
+                    if (TriangleButton($"##Up{i}", buttonSize, new Vector4(1, 1, 1, 1), true)) { MoveMapGroup(i, -1); }
                     ImGui.SameLine();
-                    if (TriangleButton($"##Down{i}", buttonSize, new Vector4(1, 1, 1, 1), false)) 
-                    { 
-                        MoveMapGroup(i, 1); 
-                    }
+                    if (TriangleButton($"##Down{i}", buttonSize, new Vector4(1, 1, 1, 1), false)) { MoveMapGroup(i, 1); }
                     ImGui.SameLine();
-                    if (ImGui.Button($"Rename Group##{i}")) 
-                    { 
-                        NewGroupName = mapGroup.Name; 
-                        ImGui.OpenPopup($"RenamePopup##{i}"); 
-                    }
+                    if (ImGui.Button($"Rename Group##{i}")) { NewGroupName = mapGroup.Name; ImGui.OpenPopup($"RenamePopup##{i}"); }
                     ImGui.SameLine();
-                    if (ImGui.Button($"Delete Group##{i}")) 
-                    { 
-                        DeleteMapGroup(i); 
-                    }
+                    if (ImGui.Button($"Delete Group##{i}")) { DeleteMapGroup(i); }
                     ImGui.SameLine();
                     ColorSwatch($"##MapGroupBackgroundColor{i}", ref mapGroup.BackgroundColor);
-                    ImGui.SameLine(); 
-                    ImGui.Text("Background Color");
+                    ImGui.SameLine(); ImGui.Text("Background Color");
                     ImGui.SameLine();
                     ColorSwatch($"##MapGroupFontColor{i}", ref mapGroup.FontColor);
                     ImGui.SameLine(); ImGui.Text("Font Color");
@@ -222,16 +235,9 @@
                     if (ImGui.BeginPopupModal($"RenamePopup##{i}", ImGuiWindowFlags.AlwaysAutoResize))
                     {
                         ImGui.InputText("New Name", ref NewGroupName, 256);
-                        if (ImGui.Button("OK")) 
-                        { 
-                            mapGroup.Name = NewGroupName; 
-                            ImGui.CloseCurrentPopup(); 
-                        }
+                        if (ImGui.Button("OK")) { mapGroup.Name = NewGroupName; ImGui.CloseCurrentPopup(); }
                         ImGui.SameLine();
-                        if (ImGui.Button("Cancel")) 
-                        { 
-                            ImGui.CloseCurrentPopup(); 
-                        }
+                        if (ImGui.Button("Cancel")) { ImGui.CloseCurrentPopup(); }
                         ImGui.EndPopup();
                     }
                 }
@@ -242,27 +248,51 @@
         public override void DrawUI()
         {
             var inventoryPanel = InventoryPanel();
-
             var isGameHelperForeground = Process.GetCurrentProcess().MainWindowHandle == GetForegroundWindow();
             if (!Core.Process.Foreground && !isGameHelperForeground) return;
 
             EnsureProcessHandle();
 
             var player = Core.States.InGameStateObject.CurrentAreaInstance.Player;
-            if (!player.TryGetComponent<Render>(out var playerRender)) return;
+            if (!player.TryGetComponent<Render>(out var _)) return;
+
+            if (!Settings.ControllerMode) if (inventoryPanel) return;
 
             var drawList = ImGui.GetBackgroundDrawList();
 
-            var atlasUi = GetAtlasPanelUi();
+            // Get atlas UiElement + its address (we need the address to read AtlasMapOffsets)
+            var (atlasUi, atlasUiAddr) = GetAtlasPanelUiWithAddress();
             var atlasCount = atlasUi.Length;
-            if (!atlasUi.IsVisible || atlasUi.FirstChild == IntPtr.Zero || atlasCount <= 0 || atlasCount > 10000) return;
 
+            // Invalidate cache when atlas closes / invalid
+            if (!atlasUi.IsVisible || atlasUi.FirstChild == IntPtr.Zero || atlasCount <= 0 || atlasCount > 10000)
+            {
+                if (_wasAtlasVisible)
+                {
+                    _pathCacheNodes.Clear();
+                    _lastSearchQuery = null;
+                    _wasAtlasVisible = false;
+                    _lastStartIdx = -1;
+                }
+                return;
+            }
+            _wasAtlasVisible = true;
+
+            // Invalidate cache when search changes
+            if (_lastSearchQuery == null || !_lastSearchQuery.Equals(Settings.SearchQuery, StringComparison.Ordinal))
+            {
+                _pathCacheNodes.Clear();
+                _lastSearchQuery = Settings.SearchQuery;
+            }
+
+            // Build groups/ranges/search list
             var towers = new HashSet<string>(
                 Settings.MapGroups
                     .Where(tower => string.Equals(tower.Name, "Towers", StringComparison.OrdinalIgnoreCase))
                     .SelectMany(tower => tower.Maps)
                     .Select(NormalizeName),
                 StringComparer.OrdinalIgnoreCase);
+
             var boundsTowers = CalculateBounds(Settings.DrawTowersInRange);
 
             var searchQuery = NormalizeName(Settings.SearchQuery);
@@ -278,38 +308,84 @@
             }
             var boundsSearch = CalculateBounds(Settings.DrawSearchInRange);
 
-            var playerLocation = Core.States.InGameStateObject.CurrentWorldInstance.WorldToScreen(playerRender.WorldPosition);
-
-            if (!Settings.ControllerMode) if (inventoryPanel) return;
+            // ===== Phase A: collect graph data for ALL nodes (centers & labels) =====
+            var nodeCenters = new List<Vector2>(atlasCount);
+            var nodeRects = new List<(Vector2 min, Vector2 max)>(atlasCount);
+            var nodeNames = new List<string>(atlasCount);
+            var nodeCompleted = new List<bool>(atlasCount);
+            var nodeAccessible = new List<bool>(atlasCount);
 
             for (int i = 0; i < atlasCount; i++)
             {
                 var atlasNode = atlasUi.GetAtlasNode(i);
+                var nameRaw = atlasNode.MapName;
+                var name = string.IsNullOrWhiteSpace(nameRaw) ? string.Empty : NormalizeName(nameRaw);
+
+                var center = atlasNode.Position * Settings.ScaleMultiplier + new Vector2(25, 0)
+                           + new Vector2(Settings.XSlider - 1500, Settings.YSlider - 1500);
+
+                nodeCenters.Add(center);
+                nodeRects.Add((Vector2.Zero, Vector2.Zero));
+                nodeNames.Add(name);
+                nodeCompleted.Add(atlasNode.IsCompleted);
+                nodeAccessible.Add(!atlasNode.IsNotAccessible);
+            }
+
+            // Start index from nearest to mouse
+            var mousePos = ImGui.GetIO().MousePos;
+            int startIdx = ClosestNodeIndex(mousePos, nodeCenters);
+            if (startIdx != _lastStartIdx)
+            {
+                _pathCacheNodes.Clear();
+                _lastStartIdx = startIdx;
+            }
+
+            // ===== Read the REAL connection graph from memory =====
+            List<AtlasNodeEntry> mapNodes = null;
+            List<AtlasNodeConnections> mapConns = null;
+            List<int>[] connectionGraph = null;
+
+            if (AtlasGraphReader.TryReadAtlasGraph(atlasUiAddr, out mapNodes, out mapConns))
+            {
+                connectionGraph = AtlasGraphReader.BuildGraphFromConnections(
+                    atlasCount,
+                    i => atlasUi.GetChildAddress(i),
+                    mapNodes,
+                    mapConns
+                );
+            }
+
+            // ===== Phase B: render labels for visible nodes & compute rects for those =====
+            for (int i = 0; i < atlasCount; i++)
+            {
+                var name = nodeNames[i];
+                if (string.IsNullOrWhiteSpace(name)) continue;
+
+                var atlasNode = atlasUi.GetAtlasNode(i);
                 var nodeUi = atlasUi.GetChild(i);
 
-                var mapName = atlasNode.MapName;
-                if (string.IsNullOrWhiteSpace(mapName))
+                if (Settings.HideCompletedMaps && (atlasNode.IsCompleted || (name.EndsWith("Citadel") && AtlasNode.IsFailedAttempt)))
                     continue;
-
-                mapName = NormalizeName(mapName);
-                if (doSearch && !searchList.Any(searchTerm => mapName.Contains(searchTerm, StringComparison.OrdinalIgnoreCase)))
-                    continue;
-
-                if (Settings.HideCompletedMaps && (atlasNode.IsCompleted || (mapName.EndsWith("Citadel") && AtlasNode.IsFailedAttempt))) 
-                    continue;
-
                 if (Settings.HideNotAccessibleMaps && atlasNode.IsNotAccessible)
                     continue;
 
                 var rawContents = GetContentName(nodeUi);
 
-                var textSize = ImGui.CalcTextSize(mapName);
-                var mapPosition = atlasNode.Position * Settings.ScaleMultiplier + new Vector2(25, 0);
-                var positionOffset = new Vector2(Settings.XSlider - 1500, Settings.YSlider - 1500);
-                var drawPosition = (mapPosition - textSize / 2) + positionOffset;
+                var textSize = ImGui.CalcTextSize(name);
+                var padding = new Vector2(5, 2);
 
+                var drawCenter = nodeCenters[i];
+                var drawPosition = drawCenter - textSize * 0.5f;
+                var bgPos = drawPosition - padding;
+                var bgSize = textSize + padding * 2;
+                var rectMin = bgPos;
+                var rectMax = bgPos + bgSize;
+
+                nodeRects[i] = (rectMin, rectMax);
+
+                // group colors
                 var group = Settings.MapGroups.Find(g => g.Maps.Exists(
-                    m => NormalizeName(m).Equals(mapName, StringComparison.OrdinalIgnoreCase)));
+                    m => NormalizeName(m).Equals(name, StringComparison.OrdinalIgnoreCase)));
 
                 var backgroundColor = group?.BackgroundColor ?? Settings.DefaultBackgroundColor;
                 var fontColor = group?.FontColor ?? Settings.DefaultFontColor;
@@ -317,35 +393,9 @@
                 if (atlasNode.IsCompleted)
                     backgroundColor.W *= 0.6f;
 
-                var padding = new Vector2(5, 2);
-                var bgPos = drawPosition - padding;
-                var bgSize = textSize + padding * 2;
-                var rectCenter = (bgPos + (bgPos + bgSize)) * 0.5f;
-                var intersectionPoint = GetLineRectangleIntersection(playerLocation, rectCenter, bgPos, bgPos + bgSize);
-
-                drawList.AddRect(bgPos, bgPos + bgSize, ImGuiHelper.Color(fontColor), 3f, ImDrawFlags.RoundCornersAll, 1f);
-                drawList.AddRectFilled(bgPos, bgPos + bgSize, ImGuiHelper.Color(backgroundColor), 3f);
-                drawList.AddText(drawPosition, ImGuiHelper.Color(fontColor), mapName);
-
-                if (Settings.DrawLinesToCitadel && mapName.EndsWith("Citadel", StringComparison.OrdinalIgnoreCase))
-                {
-                    drawList.AddLine(playerLocation, intersectionPoint, CitadelLineColor);
-                }
-
-                if (Settings.DrawLinesToTowers
-                    && towers.Contains(mapName)
-                    && !atlasNode.IsCompleted
-                    && boundsTowers.Contains(new PointF(drawPosition.X, drawPosition.Y)))
-                {
-                    drawList.AddLine(playerLocation, intersectionPoint, TowerLineColor);
-                }
-
-                if (Settings.DrawLinesSearchQuery
-                    && doSearch && searchList.Any(searchTerm => mapName.Contains(searchTerm, StringComparison.OrdinalIgnoreCase))
-                    && boundsSearch.Contains(new PointF(drawPosition.X, drawPosition.Y)))
-                {
-                    drawList.AddLine(playerLocation, intersectionPoint, SearchLineColor);
-                }
+                drawList.AddRect(rectMin, rectMax, ImGuiHelper.Color(fontColor), 3f, ImDrawFlags.RoundCornersAll, 1f);
+                drawList.AddRectFilled(rectMin, rectMax, ImGuiHelper.Color(backgroundColor), 3f);
+                drawList.AddText(drawPosition, ImGuiHelper.Color(fontColor), name);
 
                 float labelCenterX = drawPosition.X + textSize.X * 0.5f;
                 float nextRowTopY = drawPosition.Y + textSize.Y + 4;
@@ -358,6 +408,225 @@
 
                 DrawSquares(drawList, contents, labelCenterX, ref nextRowTopY, rowGap);
             }
+
+            // ===== Draw routed paths; track shortest for highlight =====
+            var candidatePaths = new List<(List<Vector2> points, float length, uint baseColor)>();
+
+            for (int i = 0; i < atlasCount; i++)
+            {
+                var name = nodeNames[i];
+                if (string.IsNullOrWhiteSpace(name)) continue;
+
+                var center = nodeCenters[i];
+                if (center == Vector2.Zero) continue;
+
+                bool isCitadel = name.EndsWith("Citadel", StringComparison.OrdinalIgnoreCase);
+                bool isTower = towers.Contains(name);
+                bool inTowersRange = boundsTowers.Contains(new PointF(center.X, center.Y));
+                bool inSearchRange = boundsSearch.Contains(new PointF(center.X, center.Y));
+                bool matchesSearch = doSearch && searchList.Any(term => name.Contains(term, StringComparison.OrdinalIgnoreCase));
+
+                bool FetchAndDraw(uint color, out (List<Vector2> pts, float len) result)
+                {
+                    result = default;
+                    if (startIdx == -1) return false;
+                    if (connectionGraph == null) return false;
+
+                    // Cache lookup / compute node path
+                    if (!_pathCacheNodes.TryGetValue((startIdx, i), out var nodePath))
+                    {
+                        if (!TryFindPathBfs(startIdx, i, connectionGraph, out nodePath))
+                            return false;
+
+                        // Respect MaxPathNodes (number of nodes on route)
+                        if (nodePath.Count > Settings.MaxPathNodes)
+                            return false;
+
+                        _pathCacheNodes[(startIdx, i)] = nodePath;
+                    }
+
+                    // Build the live polyline (mouse origin for first segment)
+                    var poly = BuildPolylineFromNodePath(mousePos, i, nodePath, nodeCenters, nodeRects, out float len);
+                    if (poly == null || poly.Count < 2) return false;
+
+                    DrawPolyline(drawList, poly, color);
+                    result = (poly, len);
+                    return true;
+                }
+
+                // Citadels
+                if (Settings.DrawLinesToCitadel && isCitadel)
+                {
+                    if (FetchAndDraw(CitadelLineColor, out var r))
+                        candidatePaths.Add((r.pts, r.len, CitadelLineColor));
+                }
+
+                // Towers
+                if (Settings.DrawLinesToTowers && isTower && inTowersRange && !nodeCompleted[i])
+                {
+                    if (FetchAndDraw(TowerLineColor, out var r))
+                        candidatePaths.Add((r.pts, r.len, TowerLineColor));
+                }
+
+                // Search
+                if (Settings.DrawLinesSearchQuery && matchesSearch && inSearchRange)
+                {
+                    if (FetchAndDraw(SearchLineColor, out var r))
+                        candidatePaths.Add((r.pts, r.len, SearchLineColor));
+                }
+            }
+
+            // Highlight the shortest among all candidates (if any)
+            if (candidatePaths.Count > 0)
+            {
+                var shortest = candidatePaths[0];
+                for (int k = 1; k < candidatePaths.Count; k++)
+                {
+                    if (candidatePaths[k].length < shortest.length)
+                        shortest = candidatePaths[k];
+                }
+                DrawPolyline(drawList, shortest.points, ShortestPathColor, 3.0f);
+            }
+        }
+
+        // ========== Helpers ==========
+
+        // Return both the UiElement and its address (we need the address for AtlasMapOffsets)
+        private (UiElement element, IntPtr address) GetAtlasPanelUiWithAddress()
+        {
+            IntPtr addr = Core.States.InGameStateObject.GameUi.Address;
+            var ui = Read<UiElement>(addr);
+
+            if (Settings.ControllerMode)
+            {
+                addr = ui.GetChildAddress(17); ui = Read<UiElement>(addr);
+                addr = ui.GetChildAddress(2); ui = Read<UiElement>(addr);
+                addr = ui.GetChildAddress(3); ui = Read<UiElement>(addr);
+                addr = ui.GetChildAddress(0); ui = Read<UiElement>(addr);
+                addr = ui.GetChildAddress(0); ui = Read<UiElement>(addr);
+                addr = ui.GetChildAddress(6); ui = Read<UiElement>(addr);
+            }
+            else
+            {
+                addr = ui.GetChildAddress(25); ui = Read<UiElement>(addr);
+                addr = ui.GetChildAddress(0); ui = Read<UiElement>(addr);
+                addr = ui.GetChildAddress(6); ui = Read<UiElement>(addr);
+            }
+            return (ui, addr);
+        }
+
+        private static void DrawPolyline(ImDrawListPtr drawList, List<Vector2> pts, uint color, float thickness = 1.5f)
+        {
+            if (pts == null || pts.Count < 2) return;
+            for (int i = 0; i < pts.Count - 1; i++)
+                drawList.AddLine(pts[i], pts[i + 1], color, thickness);
+        }
+
+        private static List<Vector2> BuildPolylineFromNodePath(Vector2 mousePos,
+                                                               int targetNodeIndex,
+                                                               List<int> nodePath,
+                                                               List<Vector2> nodeCenters,
+                                                               List<(Vector2 min, Vector2 max)> nodeRects,
+                                                               out float length)
+        {
+            length = 0f;
+            if (nodePath == null || nodePath.Count == 0) return null;
+
+            var pts = new List<Vector2>(nodePath.Count + 2)
+            {
+                mousePos,
+                nodeCenters[nodePath[0]]
+            };
+
+            for (int k = 0; k < nodePath.Count - 1; k++)
+                pts.Add(nodeCenters[nodePath[k + 1]]);
+
+            var lastPoint = nodeCenters[nodePath[^1]];
+            var (tmin, tmax) = nodeRects[targetNodeIndex];
+            if (tmin != Vector2.Zero || tmax != Vector2.Zero)
+            {
+                var tcenter = (tmin + tmax) * 0.5f;
+                var clipped = GetLineRectangleIntersection(lastPoint, tcenter, tmin, tmax);
+                pts.Add(clipped);
+            }
+            else
+            {
+                pts.Add(nodeCenters[targetNodeIndex]);
+            }
+
+            length = PathLength(pts);
+            return pts;
+        }
+
+        private static float PathLength(List<Vector2> pts)
+        {
+            float sum = 0f;
+            for (int i = 0; i < pts.Count - 1; i++)
+                sum += Vector2.Distance(pts[i], pts[i + 1]);
+            return sum;
+        }
+
+        private static bool TryFindPathBfs(int start, int goal, List<int>[] graph, out List<int> path)
+        {
+            path = null;
+            if (start < 0 || goal < 0 || graph == null) return false;
+            if (start == goal) { path = new List<int> { start }; return true; }
+
+            int n = graph.Length;
+            var prev = new int[n];
+            for (int i = 0; i < n; i++) prev[i] = -1;
+
+            var q = new Queue<int>();
+            var visited = new bool[n];
+            visited[start] = true;
+            q.Enqueue(start);
+
+            while (q.Count > 0)
+            {
+                var u = q.Dequeue();
+                var adj = graph[u];
+                for (int k = 0; k < adj.Count; k++)
+                {
+                    var v = adj[k];
+                    if (visited[v]) continue;
+                    visited[v] = true;
+                    prev[v] = u;
+                    if (v == goal)
+                    {
+                        var route = new List<int> { v };
+                        int cur = v;
+                        while (prev[cur] != -1)
+                        {
+                            cur = prev[cur];
+                            route.Add(cur);
+                        }
+                        route.Reverse();
+                        path = route;
+                        return true;
+                    }
+                    q.Enqueue(v);
+                }
+            }
+
+            return false;
+        }
+
+        private static int ClosestNodeIndex(Vector2 pos, List<Vector2> centers)
+        {
+            int best = -1;
+            float bestD = float.MaxValue;
+            for (int i = 0; i < centers.Count; i++)
+            {
+                var c = centers[i];
+                if (c == Vector2.Zero) continue;
+                float d = Vector2.DistanceSquared(pos, c);
+                if (d < bestD)
+                {
+                    bestD = d;
+                    best = i;
+                }
+            }
+            return best;
         }
 
         private void LoadContentMap()
@@ -408,11 +677,7 @@
             for (int i = 0; i < infos.Count; i++)
             {
                 var info = infos[i];
-                string abbrev;
-                if (string.IsNullOrWhiteSpace(info.Abbrev))
-                    abbrev = !string.IsNullOrEmpty(info.Label) ? info.Label.Substring(0, 1) : "?";
-                else
-                    abbrev = info.Abbrev;
+                string abbrev = string.IsNullOrWhiteSpace(info.Abbrev) ? (!string.IsNullOrEmpty(info.Label) ? info.Label.Substring(0, 1) : "?") : info.Abbrev;
                 var boxSize = new Vector2(widths[i], fixedHeight);
                 var squareMin = basePos;
                 var squareMax = squareMin + boxSize;
@@ -428,6 +693,7 @@
 
             nextRowTopY += fixedHeight + rowGap;
         }
+
         private static Vector2 GetLineRectangleIntersection(Vector2 lineStart, Vector2 rectCenter, Vector2 rectMin, Vector2 rectMax)
         {
             if (lineStart.X >= rectMin.X && lineStart.X <= rectMax.X &&
@@ -446,20 +712,14 @@
             float tMinY = (rectMin.Y - lineStart.Y) / dirY;
             float tMaxY = (rectMax.Y - lineStart.Y) / dirY;
 
-            if (tMinX > tMaxX) {
-                (tMaxX, tMinX) = (tMinX, tMaxX);
-            }
-            if (tMinY > tMaxY) {
-                (tMaxY, tMinY) = (tMinY, tMaxY);
-            }
+            if (tMinX > tMaxX) { (tMaxX, tMinX) = (tMinX, tMaxX); }
+            if (tMinY > tMaxY) { (tMaxY, tMinY) = (tMinY, tMaxY); }
 
             float tEnter = Math.Max(tMinX, tMinY);
             float tExit = Math.Min(tMaxX, tMaxY);
 
             if (tEnter > tExit || tEnter < 0)
-            {
                 return rectCenter;
-            }
 
             float t = Math.Min(tEnter, 1.0f);
             return lineStart + direction * t;
@@ -568,9 +828,7 @@
         }
 
         private static string NormalizeName(string s) =>
-            string.IsNullOrWhiteSpace(s)
-                ? s
-                : CollapseWhitespace(s.Replace('\u00A0', ' ').Trim());
+            string.IsNullOrWhiteSpace(s) ? s : CollapseWhitespace(s.Replace('\u00A0', ' ').Trim());
 
         private static string CollapseWhitespace(string s)
         {
@@ -595,23 +853,7 @@
 
         private UiElement GetAtlasPanelUi()
         {
-            var uiElement = Read<UiElement>(Core.States.InGameStateObject.GameUi.Address);
-            if (Settings.ControllerMode)
-            {
-                uiElement = uiElement.GetChild(17);
-                uiElement = uiElement.GetChild(2);
-                uiElement = uiElement.GetChild(3);
-                uiElement = uiElement.GetChild(0);
-                uiElement = uiElement.GetChild(0);
-                uiElement = uiElement.GetChild(6);
-            }
-            else
-            {
-                uiElement = uiElement.GetChild(25);
-                uiElement = uiElement.GetChild(0);
-                uiElement = uiElement.GetChild(6);
-            }
-            return uiElement;
+            return GetAtlasPanelUiWithAddress().element;
         }
 
         private static bool InventoryPanel()
@@ -676,7 +918,7 @@
             int rb = lb >= 0 ? normalized.IndexOf(']', lb + 1) : -1;
             if (lb >= 0 && rb > lb + 1)
             {
-                var inside = normalized.Substring(lb + 1, rb - lb - 1);
+                var inside = normalized[(lb + 1)..rb];
                 var pipe = inside.IndexOf('|');
                 var tag = (pipe >= 0 ? inside[..pipe] : inside).Trim();
 
@@ -688,16 +930,12 @@
             }
 
             foreach (var map in plainMap)
-            {
                 if (normalized.Contains(map.Key, StringComparison.OrdinalIgnoreCase))
                     return map.Value;
-            }
 
             foreach (var tag in tagMap)
-            {
                 if (normalized.Contains(tag.Key, StringComparison.OrdinalIgnoreCase))
                     return tag.Value;
-            }
 
             return null;
         }

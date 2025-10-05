@@ -1,6 +1,7 @@
 ﻿using GameHelper.Plugin;
 using System.Collections.Generic;
 using System.Numerics;
+using System.Runtime.InteropServices;
 
 namespace Atlas
 {
@@ -15,6 +16,7 @@ namespace Atlas
         public bool HideCompletedMaps = true;
         public bool HideNotAccessibleMaps = false;
         public bool HideFailedMaps = true;
+        public int MaxPathNodes = 24;
         public float ScaleMultiplier = 1.0f;
         public bool DrawLinesToCitadel = false;
         public bool DrawLinesToTowers = false;
