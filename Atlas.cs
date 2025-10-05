@@ -89,12 +89,19 @@
 
             ImGui.Separator();
 
+            ImGui.Checkbox("Auto Layout", ref Settings.AutoLayout);
+            var nudge = Settings.AnchorNudge;
+            if (ImGui.InputFloat2("Anchor Nudge (px)", ref nudge))
+                Settings.AnchorNudge = nudge;
+
+            if (Settings.AutoLayout) ImGui.BeginDisabled();
             ImGui.SliderFloat("##ScaleMultiplier", ref Settings.ScaleMultiplier, 0.5f, 2.0f);
             ImGui.SameLine(); ImGui.Text("Scale Multiplier");
             ImGui.SliderFloat("##XSlider", ref Settings.XSlider, 0.0f, 3000.0f);
             ImGui.SameLine(); ImGui.Text("Move X Axis");
             ImGui.SliderFloat("##YSlider", ref Settings.YSlider, 0.0f, 3000.0f);
             ImGui.SameLine(); ImGui.Text("Move Y Axis");
+            if (Settings.AutoLayout) ImGui.EndDisabled();
 
             if (ImGui.CollapsingHeader("Badge Settings"))
             {
@@ -281,6 +288,10 @@
 
             var playerLocation = Core.States.InGameStateObject.CurrentWorldInstance.WorldToScreen(playerRender.WorldPosition);
 
+            float uiScale = Settings.AutoLayout ? GetHeightScale() : Settings.ScaleMultiplier;
+            uiScale = MathF.Min(MathF.Max(uiScale, 0.75f), 3.0f);
+            using (new FontScaleScope(uiScale))
+
             if (!Settings.ControllerMode) if (inventoryPanel) return;
 
             for (int i = 0; i < atlasCount; i++)
@@ -307,9 +318,21 @@
                 var rawContents = GetContentName(nodeUi);
 
                 var textSize = ImGui.CalcTextSize(mapName);
-                var mapPosition = atlasNode.Position * Settings.ScaleMultiplier + new Vector2(25, 0);
-                var positionOffset = new Vector2(Settings.XSlider - 1500, Settings.YSlider - 1500);
-                var drawPosition = (mapPosition - textSize / 2) + positionOffset;
+
+                Vector2 drawPosition;
+                if (Settings.AutoLayout)
+                {
+                    float scale = GetHeightScale();
+                    var mapPosition = (atlasNode.Position + new Vector2(25, 0)) * scale;
+                    var positionOffset = GetAutoOffset(scale);
+                    drawPosition = (mapPosition - textSize / 2) + positionOffset;
+                }
+                else
+                {
+                    var mapPosition = atlasNode.Position * Settings.ScaleMultiplier + new Vector2(25, 0);
+                    var positionOffset = new Vector2(Settings.XSlider - 1500, Settings.YSlider - 1500);
+                    drawPosition = (mapPosition - textSize / 2) + positionOffset;
+                }
 
                 var group = Settings.MapGroups.Find(g => g.Maps.Exists(
                     m => NormalizeName(m).Equals(mapName, StringComparison.OrdinalIgnoreCase)));
@@ -320,18 +343,21 @@
                 if (atlasNode.IsCompleted)
                     backgroundColor.W *= 0.6f;
 
-                var padding = new Vector2(5, 2);
+                var padding = new Vector2(5, 2) * uiScale;
                 var bgPos = drawPosition - padding;
                 var bgSize = textSize + padding * 2;
                 var rectCenter = (bgPos + (bgPos + bgSize)) * 0.5f;
                 var intersectionPoint = GetLineRectangleIntersection(playerLocation, rectCenter, bgPos, bgPos + bgSize);
 
-                drawList.AddRect(bgPos, bgPos + bgSize, ImGuiHelper.Color(fontColor), 3f, ImDrawFlags.RoundCornersAll, 1f);
-                drawList.AddRectFilled(bgPos, bgPos + bgSize, ImGuiHelper.Color(backgroundColor), 3f);
+                float rounding = 3f * uiScale;
+                float borderTh = MathF.Max(1f, 1f * uiScale);
+                drawList.AddRect(bgPos, bgPos + bgSize, ImGuiHelper.Color(fontColor), rounding, ImDrawFlags.RoundCornersAll, borderTh);
+                drawList.AddRectFilled(bgPos, bgPos + bgSize, ImGuiHelper.Color(backgroundColor), rounding);
+                drawList.AddText(drawPosition, ImGuiHelper.Color(fontColor), mapName);
 
                 if (Settings.DrawLinesToCitadel && mapName.EndsWith("Citadel", StringComparison.OrdinalIgnoreCase))
                 {
-                    drawList.AddLine(playerLocation, intersectionPoint, CitadelLineColor);
+                    drawList.AddLine(playerLocation, intersectionPoint, CitadelLineColor, borderTh);
                 }
 
                 if (Settings.DrawLinesToTowers
@@ -339,26 +365,26 @@
                     && !atlasNode.IsCompleted
                     && boundsTowers.Contains(new PointF(drawPosition.X, drawPosition.Y)))
                 {
-                    drawList.AddLine(playerLocation, intersectionPoint, TowerLineColor);
+                    drawList.AddLine(playerLocation, intersectionPoint, TowerLineColor, borderTh);
                 }
 
                 if (Settings.DrawLinesSearchQuery
                     && doSearch && searchList.Any(searchTerm => mapName.Contains(searchTerm, StringComparison.OrdinalIgnoreCase))
                     && boundsSearch.Contains(new PointF(drawPosition.X, drawPosition.Y)))
                 {
-                    drawList.AddLine(playerLocation, intersectionPoint, SearchLineColor);
+                    drawList.AddLine(playerLocation, intersectionPoint, SearchLineColor, borderTh);
                 }
 
                 float labelCenterX = drawPosition.X + textSize.X * 0.5f;
-                float nextRowTopY = drawPosition.Y + textSize.Y + 4;
-                const float rowGap = 4f;
+                float nextRowTopY = drawPosition.Y + textSize.Y + (4f * uiScale);
+                float rowGap = 4f * uiScale;
 
                 CategorizeContents(rawContents, MapTags, MapPlain, out var flags, out var contents);
 
                 if (Settings.ShowMapBadges)
-                    DrawSquares(drawList, flags, labelCenterX, ref nextRowTopY, rowGap);
+                    DrawSquares(drawList, flags, labelCenterX, ref nextRowTopY, rowGap, uiScale);
 
-                DrawSquares(drawList, contents, labelCenterX, ref nextRowTopY, rowGap);
+                DrawSquares(drawList, contents, labelCenterX, ref nextRowTopY, rowGap, uiScale);
             }
         }
 
@@ -386,12 +412,28 @@
             ApplyOverrides();
         }
 
-        private static void DrawSquares(ImDrawListPtr drawList, List<ContentInfo> infos, float centerX, ref float nextRowTopY, float rowGap)
+        private float GetHeightScale()
+        {
+            var io = ImGui.GetIO();
+            return io.DisplaySize.Y / MathF.Max(1f, Settings.BaseHeight);
+        }
+
+        private Vector2 GetAutoOffset(float scale)
+        {
+            var io = ImGui.GetIO();
+            var curCenter = new Vector2(io.DisplaySize.X, io.DisplaySize.Y) * 0.5f;
+            var baseCenter = new Vector2(Settings.BaseWidth, Settings.BaseHeight) * 0.5f;
+            return (curCenter - baseCenter * scale) + Settings.AnchorNudge;
+        }
+
+        private static void DrawSquares(ImDrawListPtr drawList, List<ContentInfo> infos, float centerX, ref float nextRowTopY, float rowGap, float uiScale)
         {
             if (infos.Count == 0) return;
 
-            const float fixedHeight = 18f;
-            const float padding = 6f;
+            const float fixedHeightBase = 18f;
+            const float paddingBase = 6f;
+            float fixedHeight = fixedHeightBase * uiScale;
+            float padding = paddingBase * uiScale;
 
             var widths = new List<float>(infos.Count);
             float totalW = 0f;
@@ -429,6 +471,24 @@
             }
 
             nextRowTopY += fixedHeight + rowGap;
+        }
+
+        private readonly struct FontScaleScope : IDisposable
+        {
+            private readonly ImFontPtr _font;
+            private readonly float _prevScale;
+            public FontScaleScope(float scale)
+            {
+                _font = ImGui.GetFont();
+                _prevScale = _font.Scale;
+                _font.Scale = _prevScale * scale;
+                ImGui.PushFont(_font);
+            }
+            public void Dispose()
+            {
+                ImGui.PopFont();
+                _font.Scale = _prevScale;
+            }
         }
 
         private static Vector2 GetLineRectangleIntersection(Vector2 lineStart, Vector2 rectCenter, Vector2 rectMin, Vector2 rectMax)

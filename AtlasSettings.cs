@@ -20,6 +20,11 @@ namespace Atlas
         public bool HideNotAccessibleMaps = false;
         public bool HideFailedMaps = true;
 
+        public bool AutoLayout = true;
+        public float BaseWidth = 1920f;
+        public float BaseHeight = 1080f;
+        public Vector2 AnchorNudge = Vector2.Zero;
+
         public float ScaleMultiplier = 1.0f;
         public float XSlider = 1500.0f;
         public float YSlider = 1512.0f;
