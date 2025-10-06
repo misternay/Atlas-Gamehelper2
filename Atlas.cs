@@ -4,6 +4,8 @@
     using GameHelper.Plugin;
     using GameHelper.RemoteObjects.Components;
     using GameHelper.Utils;
+    using GameOffsets.Natives;
+    using GameOffsets.Objects.UiElement;
     using ImGuiNET;
     using Newtonsoft.Json;
     using System;
@@ -22,6 +24,7 @@
         private const uint CitadelLineColor = 0xFF0000FF;
         private const uint TowerLineColor = 0xFFC6C10D;
         private const uint SearchLineColor = 0xFFFFFFFF;
+        private const uint GridLineColor = 0x50FFFFFF;
 
         private string SettingPathname => Path.Join(DllDirectory, "config", "settings.txt");
         private string NewGroupName = string.Empty;
@@ -67,6 +70,15 @@
             ImGui.Text("Use Controller Mode");
             ImGui.Separator();
 
+            ImGui.Checkbox("Draw Atlas Grid", ref Settings.DrawGrid);
+            if (Settings.DrawGrid)
+                if (ImGui.CollapsingHeader("Atlas Grid Settings"))
+                {
+                    ImGui.Checkbox("Hide connections to completed maps", ref Settings.GridSkipCompleted);
+                }
+
+            ImGui.Separator();
+
             ImGui.Text("You can search for multiple maps at once. To do this, separate them with a comma ','");
             ImGui.InputText("Search Map##AtlasSearch", ref Settings.SearchQuery, 256);
             ImGui.SameLine();
@@ -80,9 +92,11 @@
             ImGui.Separator();
 
             ImGui.Checkbox("##ShowMapBadges", ref Settings.ShowMapBadges);
-            ImGui.SameLine(); ImGui.Text("Show Map Content Badges");
+            ImGui.SameLine(); 
+            ImGui.Text("Show Map Content Badges");
             ImGui.Checkbox("##HideCompletedMaps", ref Settings.HideCompletedMaps);
-            ImGui.SameLine(); ImGui.Text("Hide Completed Maps");
+            ImGui.SameLine(); 
+            ImGui.Text("Hide Completed Maps");
 
             ImGui.Checkbox("##HideNotAccessibleMaps", ref Settings.HideNotAccessibleMaps);
             ImGui.SameLine(); ImGui.Text("Hide Not Accessible Maps");
@@ -94,14 +108,20 @@
             if (ImGui.InputFloat2("Anchor Nudge (px)", ref nudge))
                 Settings.AnchorNudge = nudge;
 
-            if (Settings.AutoLayout) ImGui.BeginDisabled();
             ImGui.SliderFloat("##ScaleMultiplier", ref Settings.ScaleMultiplier, 0.5f, 2.0f);
-            ImGui.SameLine(); ImGui.Text("Scale Multiplier");
+            ImGui.SameLine(); 
+            ImGui.Text("Scale Multiplier");
+
+            if (Settings.AutoLayout) 
+                ImGui.BeginDisabled();
             ImGui.SliderFloat("##XSlider", ref Settings.XSlider, 0.0f, 3000.0f);
-            ImGui.SameLine(); ImGui.Text("Move X Axis");
+            ImGui.SameLine(); 
+            ImGui.Text("Move X Axis");
             ImGui.SliderFloat("##YSlider", ref Settings.YSlider, 0.0f, 3000.0f);
-            ImGui.SameLine(); ImGui.Text("Move Y Axis");
-            if (Settings.AutoLayout) ImGui.EndDisabled();
+            ImGui.SameLine(); 
+            ImGui.Text("Move Y Axis");
+            if (Settings.AutoLayout) 
+                ImGui.EndDisabled();
 
             if (ImGui.CollapsingHeader("Badge Settings"))
             {
@@ -252,18 +272,30 @@
             var inventoryPanel = InventoryPanel();
 
             var isGameHelperForeground = Process.GetCurrentProcess().MainWindowHandle == GetForegroundWindow();
-            if (!Core.Process.Foreground && !isGameHelperForeground) return;
+            if (!Core.Process.Foreground && !isGameHelperForeground) 
+                return;
 
             EnsureProcessHandle();
 
             var player = Core.States.InGameStateObject.CurrentAreaInstance.Player;
-            if (!player.TryGetComponent<Render>(out var playerRender)) return;
+            if (!player.TryGetComponent<Render>(out var playerRender)) 
+                return;
 
             var drawList = ImGui.GetBackgroundDrawList();
 
             var atlasUi = GetAtlasPanelUi();
-            var atlasCount = atlasUi.Length;
-            if (!atlasUi.IsVisible || atlasUi.FirstChild == IntPtr.Zero || atlasCount <= 0 || atlasCount > 10000) return;
+            if (!atlasUi.IsVisible)
+                return;
+
+            var panelAddr = GetAtlasPanelAddress();
+            var atlasMap = panelAddr != IntPtr.Zero 
+                ? Read<AtlasMapOffsets>(panelAddr) 
+                : default;
+            bool useVector = TryVectorCount<AtlasNodeEntry>(atlasMap.AtlasNodes, out int vecCount)
+                && vecCount > 0 && vecCount <= 10000;
+            var atlasCount = useVector ? vecCount : atlasUi.Length;
+            if (atlasCount <= 0 || atlasCount > 10000)
+                return;
 
             var towers = new HashSet<string>(
                 Settings.MapGroups
@@ -288,110 +320,228 @@
 
             var playerLocation = Core.States.InGameStateObject.CurrentWorldInstance.WorldToScreen(playerRender.WorldPosition);
 
-            float uiScale = Settings.AutoLayout ? GetHeightScale() : Settings.ScaleMultiplier;
-            uiScale = MathF.Min(MathF.Max(uiScale, 0.75f), 3.0f);
+            float resScale = ComputeRelativeUiScale(in atlasUi.UiElementBase, Settings.BaseWidth, Settings.BaseHeight);
+            float uiScale = Math.Clamp(Settings.ScaleMultiplier * resScale, 0.5f, 4.0f);
             using (new FontScaleScope(uiScale))
-
-            if (!Settings.ControllerMode) if (inventoryPanel) return;
-
-            for (int i = 0; i < atlasCount; i++)
             {
-                var atlasNode = atlasUi.GetAtlasNode(i);
-                var nodeUi = atlasUi.GetChild(i);
+                if (!Settings.ControllerMode) 
+                    if (inventoryPanel) 
+                        return;
 
-                var mapName = NormalizeName(atlasNode.MapName);
-                if (!IsPrintableUnicode(mapName))
-                    continue;
-
-                if (string.IsNullOrWhiteSpace(mapName))
-                    continue;
-
-                if (doSearch && !searchList.Any(searchTerm => mapName.Contains(searchTerm, StringComparison.OrdinalIgnoreCase)))
-                    continue;
-
-                if (Settings.HideCompletedMaps && (atlasNode.IsCompleted || (mapName.EndsWith("Citadel") && AtlasNode.IsFailedAttempt))) 
-                    continue;
-
-                if (Settings.HideNotAccessibleMaps && atlasNode.IsNotAccessible)
-                    continue;
-
-                var rawContents = GetContentName(nodeUi);
-
-                var textSize = ImGui.CalcTextSize(mapName);
-
-                Vector2 drawPosition;
-                if (Settings.AutoLayout)
+                if (Settings.DrawGrid && useVector)
                 {
-                    float scale = GetHeightScale();
-                    var mapPosition = (atlasNode.Position + new Vector2(25, 0)) * scale;
-                    var positionOffset = GetAutoOffset(scale);
-                    drawPosition = (mapPosition - textSize / 2) + positionOffset;
+                    var panelTopLeft = GetFinalTopLeft(in atlasUi.UiElementBase);
+                    var panelScale = ComputeScalePair(in atlasUi.UiElementBase);
+                    var panelSize = new Vector2(
+                        atlasUi.UiElementBase.UnscaledSize.X * panelScale.X,
+                        atlasUi.UiElementBase.UnscaledSize.Y * panelScale.Y);
+                    var panelRect = new RectangleF(panelTopLeft.X, panelTopLeft.Y, panelSize.X, panelSize.Y);
+
+                    var centers = new Dictionary<StdTuple2D<int>, Vector2>();
+                    var completed = new HashSet<StdTuple2D<int>>();
+
+                    Vector2 renderOffset = Settings.AutoLayout
+                        ? Settings.AnchorNudge
+                        : new Vector2(Settings.XSlider - 1500f, Settings.YSlider - 1500f);
+
+                    for (int i = 0; i < vecCount; i++)
+                    {
+                        var entry = ReadVectorAt<AtlasNodeEntry>(atlasMap.AtlasNodes, i);
+                        if (entry.UiElementPtr == IntPtr.Zero)
+                            continue;
+
+                        var node = Read<AtlasNode>(entry.UiElementPtr);
+
+                        var nodeTopLeft = GetFinalTopLeft(in node.UiElementBase);
+                        var nodeScale = ComputeScalePair(in node.UiElementBase);
+                        var nodeSize = new Vector2(
+                            node.UiElementBase.UnscaledSize.X * nodeScale.X,
+                            node.UiElementBase.UnscaledSize.Y * nodeScale.Y);
+
+                        var nodeCenter = nodeTopLeft + nodeSize * 0.5f;
+
+                        if (!panelRect.Contains(nodeCenter.X, nodeCenter.Y))
+                            continue;
+
+                        centers[entry.GridPosition] = nodeCenter;
+
+                        if (node.IsCompleted)
+                            completed.Add(entry.GridPosition);
+                    }
+
+                    static (int x, int y) XY(StdTuple2D<int> t) => (t.X, t.Y);
+
+                    static bool IsCanonical(StdTuple2D<int> a, StdTuple2D<int> b)
+                    {
+                        var (ax, ay) = XY(a);
+                        var (bx, by) = XY(b);
+
+                        return (ax < bx) || (ax == bx && ay <= by);
+                    }
+
+                    if (TryVectorCount<AtlasNodeConnections>(atlasMap.AtlasNodeConnections, out int connCount)
+                        && connCount > 0)
+                    {
+                        float lineTh = MathF.Max(1f, uiScale * 2.5f);
+
+                        for (int i = 0; i < connCount; i++)
+                        {
+                            var cn = ReadVectorAt<AtlasNodeConnections>(atlasMap.AtlasNodeConnections, i);
+                            var src = cn.GridPosition;
+
+                            if (!centers.TryGetValue(src, out var a))
+                                continue;
+
+                            var targets = new[]
+                            {
+                                cn.Connection1, cn.Connection2, cn.Connection3, cn.Connection4
+                            };
+
+                            foreach (var dst in targets)
+                            {
+                                if (dst.Equals(default(StdTuple2D<int>)) || dst.Equals(src))
+                                    continue;
+
+                                if (!IsCanonical(src, dst))
+                                    continue;
+
+                                if (!centers.TryGetValue(dst, out var b))
+                                    continue;
+
+                                if (Settings.GridSkipCompleted && (completed.Contains(src) || completed.Contains(dst)))
+                                    continue;
+
+                                drawList.AddLine(a, b, GridLineColor, lineTh);
+                            }
+                        }
+                    }
                 }
-                else
+
+                for (int i = 0; i < atlasCount; i++)
                 {
-                    var mapPosition = atlasNode.Position * Settings.ScaleMultiplier + new Vector2(25, 0);
-                    var positionOffset = new Vector2(Settings.XSlider - 1500, Settings.YSlider - 1500);
-                    drawPosition = (mapPosition - textSize / 2) + positionOffset;
+                    AtlasNode atlasNode;
+                    UiElement nodeUi;
+                    if (useVector)
+                    {
+                        var entry = ReadVectorAt<AtlasNodeEntry>(atlasMap.AtlasNodes, i);
+                        if (entry.UiElementPtr == IntPtr.Zero)
+                            continue;
+                        atlasNode = Read<AtlasNode>(entry.UiElementPtr);
+                        nodeUi = Read<UiElement>(entry.UiElementPtr);
+                    }
+                    else
+                    {
+                        atlasNode = atlasUi.GetAtlasNode(i);
+                        nodeUi = atlasUi.GetChild(i);
+                    }
+
+                    var mapName = NormalizeName(atlasNode.MapName);
+                    if (!IsPrintableUnicode(mapName))
+                        continue;
+
+                    if (string.IsNullOrWhiteSpace(mapName))
+                        continue;
+
+                    if (doSearch && !searchList.Any(searchTerm => mapName.Contains(searchTerm, StringComparison.OrdinalIgnoreCase)))
+                        continue;
+
+                    if (Settings.HideCompletedMaps && (atlasNode.IsCompleted || (mapName.EndsWith("Citadel") && AtlasNode.IsFailedAttempt)))
+                        continue;
+
+                    if (Settings.HideNotAccessibleMaps && atlasNode.IsNotAccessible)
+                        continue;
+
+                    var rawContents = GetContentName(nodeUi);
+
+                    var textSize = ImGui.CalcTextSize(mapName);
+
+                    Vector2 drawPosition;
+                    if (Settings.AutoLayout)
+                    {
+                        var nodeTopLeft = GetFinalTopLeft(in atlasNode.UiElementBase);
+                        var nodeScale = ComputeScalePair(in atlasNode.UiElementBase);
+                        var nodeSize = new Vector2(
+                            atlasNode.UiElementBase.UnscaledSize.X * nodeScale.X,
+                            atlasNode.UiElementBase.UnscaledSize.Y * nodeScale.Y);
+
+                        var nodeCenter = nodeTopLeft + nodeSize * 0.5f;
+                        drawPosition = nodeCenter - textSize * 0.5f;
+
+                        drawPosition += Settings.AnchorNudge;
+                    }
+                    else
+                    {
+                        var nodeTopLeft = GetFinalTopLeft(in atlasNode.UiElementBase);
+                        var nodeScale = ComputeScalePair(in atlasNode.UiElementBase);
+                        var nodeSize = new Vector2(
+                            atlasNode.UiElementBase.UnscaledSize.X * nodeScale.X,
+                            atlasNode.UiElementBase.UnscaledSize.Y * nodeScale.Y);
+
+                        var nodeCenter = nodeTopLeft + nodeSize * 0.5f;
+                        var posOffset = new Vector2(Settings.XSlider - 1500f, Settings.YSlider - 1500f);
+                        drawPosition = nodeCenter - textSize * 0.5f + posOffset;
+                    }
+
+                    var group = Settings.MapGroups.Find(g => g.Maps.Exists(
+                        m => NormalizeName(m).Equals(mapName, StringComparison.OrdinalIgnoreCase)));
+
+                    var backgroundColor = group?.BackgroundColor ?? Settings.DefaultBackgroundColor;
+                    var fontColor = group?.FontColor ?? Settings.DefaultFontColor;
+
+                    if (atlasNode.IsCompleted)
+                        backgroundColor.W *= 0.6f;
+
+                    var padding = new Vector2(5, 2) * uiScale;
+                    var bgPos = drawPosition - padding;
+                    var bgSize = textSize + padding * 2;
+                    var rectCenter = (bgPos + (bgPos + bgSize)) * 0.5f;
+                    var intersectionPoint = GetLineRectangleIntersection(playerLocation, rectCenter, bgPos, bgPos + bgSize);
+
+                    float rounding = 3f * uiScale;
+                    float borderTh = MathF.Max(1f, 1f * uiScale);
+                    drawList.AddRect(bgPos, bgPos + bgSize, ImGuiHelper.Color(fontColor), rounding, ImDrawFlags.RoundCornersAll, borderTh);
+                    drawList.AddRectFilled(bgPos, bgPos + bgSize, ImGuiHelper.Color(backgroundColor), rounding);
+                    drawList.AddText(drawPosition, ImGuiHelper.Color(fontColor), mapName);
+
+                    if (Settings.DrawLinesToCitadel && mapName.EndsWith("Citadel", StringComparison.OrdinalIgnoreCase))
+                    {
+                        drawList.AddLine(playerLocation, intersectionPoint, CitadelLineColor, borderTh);
+                    }
+
+                    if (Settings.DrawLinesToTowers
+                        && towers.Contains(mapName)
+                        && !atlasNode.IsCompleted
+                        && boundsTowers.Contains(new PointF(drawPosition.X, drawPosition.Y)))
+                    {
+                        drawList.AddLine(playerLocation, intersectionPoint, TowerLineColor, borderTh);
+                    }
+
+                    if (Settings.DrawLinesSearchQuery
+                        && doSearch && searchList.Any(searchTerm => mapName.Contains(searchTerm, StringComparison.OrdinalIgnoreCase))
+                        && boundsSearch.Contains(new PointF(drawPosition.X, drawPosition.Y)))
+                    {
+                        drawList.AddLine(playerLocation, intersectionPoint, SearchLineColor, borderTh);
+                    }
+
+                    float labelCenterX = drawPosition.X + textSize.X * 0.5f;
+                    float nextRowTopY = drawPosition.Y + textSize.Y + (4f * uiScale);
+                    float rowGap = 4f * uiScale;
+
+                    CategorizeContents(rawContents, MapTags, MapPlain, out var flags, out var contents);
+
+                    if (Settings.ShowMapBadges)
+                        DrawSquares(drawList, flags, labelCenterX, ref nextRowTopY, rowGap, uiScale);
+
+                    DrawSquares(drawList, contents, labelCenterX, ref nextRowTopY, rowGap, uiScale);
                 }
-
-                var group = Settings.MapGroups.Find(g => g.Maps.Exists(
-                    m => NormalizeName(m).Equals(mapName, StringComparison.OrdinalIgnoreCase)));
-
-                var backgroundColor = group?.BackgroundColor ?? Settings.DefaultBackgroundColor;
-                var fontColor = group?.FontColor ?? Settings.DefaultFontColor;
-
-                if (atlasNode.IsCompleted)
-                    backgroundColor.W *= 0.6f;
-
-                var padding = new Vector2(5, 2) * uiScale;
-                var bgPos = drawPosition - padding;
-                var bgSize = textSize + padding * 2;
-                var rectCenter = (bgPos + (bgPos + bgSize)) * 0.5f;
-                var intersectionPoint = GetLineRectangleIntersection(playerLocation, rectCenter, bgPos, bgPos + bgSize);
-
-                float rounding = 3f * uiScale;
-                float borderTh = MathF.Max(1f, 1f * uiScale);
-                drawList.AddRect(bgPos, bgPos + bgSize, ImGuiHelper.Color(fontColor), rounding, ImDrawFlags.RoundCornersAll, borderTh);
-                drawList.AddRectFilled(bgPos, bgPos + bgSize, ImGuiHelper.Color(backgroundColor), rounding);
-                drawList.AddText(drawPosition, ImGuiHelper.Color(fontColor), mapName);
-
-                if (Settings.DrawLinesToCitadel && mapName.EndsWith("Citadel", StringComparison.OrdinalIgnoreCase))
-                {
-                    drawList.AddLine(playerLocation, intersectionPoint, CitadelLineColor, borderTh);
-                }
-
-                if (Settings.DrawLinesToTowers
-                    && towers.Contains(mapName)
-                    && !atlasNode.IsCompleted
-                    && boundsTowers.Contains(new PointF(drawPosition.X, drawPosition.Y)))
-                {
-                    drawList.AddLine(playerLocation, intersectionPoint, TowerLineColor, borderTh);
-                }
-
-                if (Settings.DrawLinesSearchQuery
-                    && doSearch && searchList.Any(searchTerm => mapName.Contains(searchTerm, StringComparison.OrdinalIgnoreCase))
-                    && boundsSearch.Contains(new PointF(drawPosition.X, drawPosition.Y)))
-                {
-                    drawList.AddLine(playerLocation, intersectionPoint, SearchLineColor, borderTh);
-                }
-
-                float labelCenterX = drawPosition.X + textSize.X * 0.5f;
-                float nextRowTopY = drawPosition.Y + textSize.Y + (4f * uiScale);
-                float rowGap = 4f * uiScale;
-
-                CategorizeContents(rawContents, MapTags, MapPlain, out var flags, out var contents);
-
-                if (Settings.ShowMapBadges)
-                    DrawSquares(drawList, flags, labelCenterX, ref nextRowTopY, rowGap, uiScale);
-
-                DrawSquares(drawList, contents, labelCenterX, ref nextRowTopY, rowGap, uiScale);
             }
         }
 
         private void LoadContentMap()
         {
             var path = Path.Join(DllDirectory, "json", "content.json");
-            if (!File.Exists(path)) return;
+            if (!File.Exists(path)) 
+                return;
 
             var json = File.ReadAllText(path);
             var contents = JsonConvert.DeserializeObject<Dictionary<string, ContentInfo>>(json);
@@ -399,7 +549,8 @@
             MapTags.Clear();
             MapPlain.Clear();
 
-            if (contents is null) return;
+            if (contents is null) 
+                return;
 
             foreach (var content in contents)
             {
@@ -412,23 +563,92 @@
             ApplyOverrides();
         }
 
-        private float GetHeightScale()
+        private static Vector2 ComputeScalePair(in UiElementBaseOffset uiBase)
         {
             var io = ImGui.GetIO();
-            return io.DisplaySize.Y / MathF.Max(1f, Settings.BaseHeight);
+            float baseW = (float)UiElementBaseFuncs.BaseResolution.X;
+            float baseH = (float)UiElementBaseFuncs.BaseResolution.Y;
+            float sx = io.DisplaySize.X / MathF.Max(1f, baseW);
+            float sy = io.DisplaySize.Y / MathF.Max(1f, baseH);
+
+            Vector2 pair;
+            switch (uiBase.ScaleIndex)
+            {
+                case 0:
+                    pair = new Vector2(sx, sx);
+                    break;
+                case 1:
+                    pair = new Vector2(sy, sy);
+                    break;
+                case 2:
+                    float s = MathF.Min(sx, sy);
+                    pair = new Vector2(s, s);
+                    break;
+                default:
+                    pair = new Vector2(sx, sy);
+                    break;
+            }
+
+            return pair * MathF.Max(0.0001f, uiBase.LocalScaleMultiplier);
         }
 
-        private Vector2 GetAutoOffset(float scale)
+        private static float ComputeUniformScale(in UiElementBaseOffset uiBase, float dispW, float dispH)
+        {
+            float baseW = (float)UiElementBaseFuncs.BaseResolution.X;
+            float baseH = (float)UiElementBaseFuncs.BaseResolution.Y;
+            float sx = dispW / MathF.Max(1f, baseW);
+            float sy = dispH / MathF.Max(1f, baseH);
+
+            float s = uiBase.ScaleIndex switch
+            {
+                0 => sx,
+                1 => sy,
+                2 => MathF.Min(sx, sy),
+                _ => MathF.Min(sx, sy),
+            };
+
+            return s * MathF.Max(0.0001f, uiBase.LocalScaleMultiplier);
+        }
+
+        private static float ComputeRelativeUiScale(in UiElementBaseOffset uiBase, float refW, float refH)
         {
             var io = ImGui.GetIO();
-            var curCenter = new Vector2(io.DisplaySize.X, io.DisplaySize.Y) * 0.5f;
-            var baseCenter = new Vector2(Settings.BaseWidth, Settings.BaseHeight) * 0.5f;
-            return (curCenter - baseCenter * scale) + Settings.AnchorNudge;
+            float cur = ComputeUniformScale(in uiBase, io.DisplaySize.X, io.DisplaySize.Y);
+            float pref = ComputeUniformScale(in uiBase, refW, refH);
+
+            return pref > 0 ? cur / pref : 1f;
         }
 
-        private static void DrawSquares(ImDrawListPtr drawList, List<ContentInfo> infos, float centerX, ref float nextRowTopY, float rowGap, float uiScale)
+        private static Vector2 GetFinalTopLeft(in UiElementBaseOffset leaf)
         {
-            if (infos.Count == 0) return;
+            Vector2 pos = Vector2.Zero;
+            UiElementBaseOffset cur = leaf;
+            int guard = 0;
+            IntPtr last = IntPtr.Zero;
+            while (true)
+            {
+                var scale = ComputeScalePair(in cur);
+                pos += new Vector2(cur.RelativePosition.X * scale.X,
+                    cur.RelativePosition.Y * scale.Y);
+                if (UiElementBaseFuncs.ShouldModifyPos(cur.Flags))
+                {
+                    pos += new Vector2(cur.PositionModifier.X * scale.X,
+                        cur.PositionModifier.Y * scale.Y);
+                }
+                if (cur.ParentPtr == IntPtr.Zero || cur.ParentPtr == last || ++guard > 64)
+                    break;
+                last = cur.Self;
+                cur = Read<UiElementBaseOffset>(cur.ParentPtr);
+            }
+
+            return pos;
+        }
+
+        private static void DrawSquares(ImDrawListPtr drawList, List<ContentInfo> infos, float centerX, 
+            ref float nextRowTopY, float rowGap, float uiScale)
+        {
+            if (infos.Count == 0) 
+                return;
 
             const float fixedHeightBase = 18f;
             const float paddingBase = 6f;
@@ -495,9 +715,7 @@
         {
             if (lineStart.X >= rectMin.X && lineStart.X <= rectMax.X &&
                 lineStart.Y >= rectMin.Y && lineStart.Y <= rectMax.Y)
-            {
                 return lineStart;
-            }
 
             Vector2 direction = rectCenter - lineStart;
 
@@ -509,30 +727,31 @@
             float tMinY = (rectMin.Y - lineStart.Y) / dirY;
             float tMaxY = (rectMax.Y - lineStart.Y) / dirY;
 
-            if (tMinX > tMaxX) {
+            if (tMinX > tMaxX)
                 (tMaxX, tMinX) = (tMinX, tMaxX);
-            }
-            if (tMinY > tMaxY) {
+
+            if (tMinY > tMaxY)
                 (tMaxY, tMinY) = (tMinY, tMaxY);
-            }
 
             float tEnter = Math.Max(tMinX, tMinY);
             float tExit = Math.Min(tMaxX, tMaxY);
 
             if (tEnter > tExit || tEnter < 0)
-            {
                 return rectCenter;
-            }
 
             float t = Math.Min(tEnter, 1.0f);
+
             return lineStart + direction * t;
         }
 
         private void MoveMapGroup(int index, int direction)
         {
-            if (index < 0 || index >= Settings.MapGroups.Count) return;
+            if (index < 0 || index >= Settings.MapGroups.Count) 
+                return;
+
             int to = index + direction;
-            if (to < 0 || to >= Settings.MapGroups.Count) return;
+            if (to < 0 || to >= Settings.MapGroups.Count) 
+                return;
 
             var item = Settings.MapGroups[index];
             Settings.MapGroups.RemoveAt(index);
@@ -541,7 +760,9 @@
 
         private void DeleteMapGroup(int index)
         {
-            if (index < 0 || index >= Settings.MapGroups.Count) return;
+            if (index < 0 || index >= Settings.MapGroups.Count) 
+                return;
+
             Settings.MapGroups.RemoveAt(index);
         }
 
@@ -549,6 +770,7 @@
         {
             if (ImGui.ColorButton(label, color))
                 ImGui.OpenPopup(label);
+
             if (ImGui.BeginPopup(label))
             {
                 ImGui.ColorPicker4(label, ref color);
@@ -579,6 +801,7 @@
             }
 
             drawList.AddTriangleFilled(p1, p2, p3, ImGuiHelper.Color(color));
+
             return pressed;
         }
 
@@ -614,19 +837,58 @@
 
         public static T Read<T>(IntPtr address) where T : unmanaged
         {
-            if (address == IntPtr.Zero) return default;
+            if (address == IntPtr.Zero) 
+                return default;
+
             EnsureProcessHandle();
             T result = default;
             ProcessMemoryUtilities.Managed.NativeWrapper.ReadProcessMemory(Handle, address, ref result);
+
             return result;
+        }
+
+        private static bool TryVectorCount<T>(in StdVector vector, out int count) 
+            where T : unmanaged
+        {
+            count = 0;
+            if (vector.First == IntPtr.Zero || vector.Last == IntPtr.Zero) 
+                return false;
+
+            long bytes = vector.Last.ToInt64() - vector.First.ToInt64();
+            if (bytes <= 0) 
+                return false;
+
+            int stride = Marshal.SizeOf<T>();
+            if (stride <= 0 || (bytes % stride) != 0) 
+                return false;
+
+            long c = bytes / stride;
+            if (c <= 0 || c > 10000)
+                return false;
+
+            count = (int)c;
+
+            return true;
+        }
+
+        private static T ReadVectorAt<T>(in StdVector vector, int index) 
+            where T : unmanaged
+        {
+            int stride = Marshal.SizeOf<T>();
+            var addr = IntPtr.Add(vector.First, index * stride);
+
+            return Read<T>(addr);
         }
 
         public static string ReadWideString(nint address, int stringLength)
         {
-            if (address == IntPtr.Zero || stringLength <= 0) return string.Empty;
+            if (address == IntPtr.Zero || stringLength <= 0) 
+                return string.Empty;
+
             EnsureProcessHandle();
             byte[] result = new byte[stringLength * 2];
             ProcessMemoryUtilities.Managed.NativeWrapper.ReadProcessMemoryArray(Handle, address, result);
+
             return Encoding.Unicode.GetString(result).Split('\0')[0];
         }
 
@@ -665,7 +927,9 @@
 
         private static string CollapseWhitespace(string s)
         {
-            if (string.IsNullOrEmpty(s)) return s;
+            if (string.IsNullOrEmpty(s)) 
+                return s;
+
             var sb = new StringBuilder(s.Length);
             bool prevSpace = false;
             foreach (var ch in s)
@@ -681,6 +945,7 @@
                 }
                 prevSpace = isSpace;
             }
+
             return sb.ToString();
         }
 
@@ -702,13 +967,40 @@
                 uiElement = uiElement.GetChild(0);
                 uiElement = uiElement.GetChild(6);
             }
+
             return uiElement;
+        }
+
+        private IntPtr GetAtlasPanelAddress()
+        {
+            IntPtr address = Core.States.InGameStateObject.GameUi.Address;
+            var root = Read<UiElement>(address);
+            if (Settings.ControllerMode)
+            {
+                address = root.GetChildAddress(17);
+                var uiElement = Read<UiElement>(address);
+                address = uiElement.GetChildAddress(2); uiElement = Read<UiElement>(address);
+                address = uiElement.GetChildAddress(3); uiElement = Read<UiElement>(address);
+                address = uiElement.GetChildAddress(0); uiElement = Read<UiElement>(address);
+                address = uiElement.GetChildAddress(0); uiElement = Read<UiElement>(address);
+                address = uiElement.GetChildAddress(6);
+            }
+            else
+            {
+                address = root.GetChildAddress(25);
+                var uiElement = Read<UiElement>(address);
+                address = uiElement.GetChildAddress(0); uiElement = Read<UiElement>(address);
+                address = uiElement.GetChildAddress(6);
+            }
+
+            return address;
         }
 
         private static bool InventoryPanel()
         {
             var uiElement = Read<UiElement>(Core.States.InGameStateObject.GameUi.Address);
             var invetoryPanel = uiElement.GetChild(33);
+
             return invetoryPanel.IsVisible;
         }
 
@@ -722,10 +1014,14 @@
             contents = [];
             foreach (var raw in raws)
             {
-                if (string.IsNullOrWhiteSpace(raw)) continue;
+                if (string.IsNullOrWhiteSpace(raw)) 
+                    continue;
+
                 var info = MatchContent(NormalizeName(raw), tagMap, plainMap);
-                if (info is null || !info.Show) continue;
-                if (info.IsFlag) flags.Add(info); else contents.Add(info);
+                if (info is null || !info.Show) 
+                    continue;
+                if (info.IsFlag) flags.Add(info); 
+                else contents.Add(info);
             }
         }
 
@@ -738,16 +1034,19 @@
             nodeUi = nodeUi.GetChild(0);
 
             var len = nodeUi.Length;
-            if (len <= 0) return result;
+            if (len <= 0) 
+                return result;
 
             for (int i = 0; i < len; i++)
             {
                 var childAddr = nodeUi.GetChildAddress(i);
                 var contentPtr = Read<IntPtr>(childAddr + ContentOffset);
-                if (contentPtr == IntPtr.Zero) continue;
+                if (contentPtr == IntPtr.Zero) 
+                    continue;
 
                 var contentName = ReadWideString(contentPtr, 64);
-                if (string.IsNullOrWhiteSpace(contentName)) continue;
+                if (string.IsNullOrWhiteSpace(contentName)) 
+                    continue;
 
                 result.Add(contentName);
             }
@@ -759,7 +1058,8 @@
             Dictionary<string, ContentInfo> tagMap,
             Dictionary<string, ContentInfo> plainMap)
         {
-            if (string.IsNullOrWhiteSpace(contentName)) return null;
+            if (string.IsNullOrWhiteSpace(contentName)) 
+                return null;
 
             var normalized = contentName.Replace("\u00A0", " ").Trim();
 
@@ -801,10 +1101,14 @@
                     MapPlain.TryGetValue(entry.Key, out info))
                 {
                     var ov = entry.Value;
-                    if (ov.BackgroundColor.HasValue) info.BackgroundColor = [ov.BackgroundColor.Value.X, ov.BackgroundColor.Value.Y, ov.BackgroundColor.Value.Z, ov.BackgroundColor.Value.W];
-                    if (ov.FontColor.HasValue) info.FontColor = [ov.FontColor.Value.X, ov.FontColor.Value.Y, ov.FontColor.Value.Z, ov.FontColor.Value.W];
-                    if (ov.Show.HasValue) info.Show = ov.Show.Value;
-                    if (!string.IsNullOrEmpty(ov.Abbrev)) info.Abbrev = ov.Abbrev;
+                    if (ov.BackgroundColor.HasValue) 
+                        info.BackgroundColor = [ov.BackgroundColor.Value.X, ov.BackgroundColor.Value.Y, ov.BackgroundColor.Value.Z, ov.BackgroundColor.Value.W];
+                    if (ov.FontColor.HasValue) 
+                        info.FontColor = [ov.FontColor.Value.X, ov.FontColor.Value.Y, ov.FontColor.Value.Z, ov.FontColor.Value.W];
+                    if (ov.Show.HasValue) 
+                        info.Show = ov.Show.Value;
+                    if (!string.IsNullOrEmpty(ov.Abbrev)) 
+                        info.Abbrev = ov.Abbrev;
                 }
             }
         }
@@ -820,6 +1124,7 @@
         private static RectangleF CalculateBounds(float range)
         {
             var baseBoundsTowers = new RectangleF(0, 0, ImGui.GetIO().DisplaySize.X, ImGui.GetIO().DisplaySize.Y);
+
             return RectangleF.Inflate(baseBoundsTowers, baseBoundsTowers.Width * (range - 1.0f), baseBoundsTowers.Height * (range - 1.0f));
         }
 

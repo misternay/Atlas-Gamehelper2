@@ -10,6 +10,8 @@ namespace Atlas
         public Vector4 DefaultFontColor = new(1.0f, 1.0f, 1.0f, 1.0f);
 
         public bool ControllerMode = false;
+        public bool DrawGrid = false;
+        public bool GridSkipCompleted = false;
 
         public string SearchQuery = string.Empty;
         public bool DrawLinesSearchQuery = true;
@@ -25,9 +27,9 @@ namespace Atlas
         public float BaseHeight = 1080f;
         public Vector2 AnchorNudge = Vector2.Zero;
 
-        public float ScaleMultiplier = 1.0f;
+        public float ScaleMultiplier = 1.1f;
         public float XSlider = 1500.0f;
-        public float YSlider = 1512.0f;
+        public float YSlider = 1500.0f;
 
         public bool DrawLinesToCitadel = false;
         public bool DrawLinesToTowers = false;
