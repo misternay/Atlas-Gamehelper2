@@ -15,6 +15,7 @@
     using System.Globalization;
     using System.IO;
     using System.Linq;
+    using System.Net;
     using System.Numerics;
     using System.Runtime.InteropServices;
     using System.Text;
@@ -28,6 +29,8 @@
 
         private string SettingPathname => Path.Join(DllDirectory, "config", "settings.txt");
         private string NewGroupName = string.Empty;
+        private string _exportStatusMessage = string.Empty;
+        private Vector4 _exportStatusColor = new(1f, 1f, 1f, 1f);
 
         private static readonly Dictionary<string, ContentInfo> MapTags = [];
         private static readonly Dictionary<string, ContentInfo> MapPlain = [];
@@ -76,6 +79,18 @@
                 {
                     ImGui.Checkbox("Hide connections to completed maps", ref Settings.GridSkipCompleted);
                 }
+
+            ImGui.Separator();
+
+            if (ImGui.Button("Export Atlas Graph##AtlasExport"))
+            {
+                ExportAtlasGraph();
+            }
+            if (!string.IsNullOrEmpty(_exportStatusMessage))
+            {
+                ImGui.SameLine();
+                ImGui.TextColored(_exportStatusColor, _exportStatusMessage);
+            }
 
             ImGui.Separator();
 
@@ -1014,16 +1029,355 @@
             contents = [];
             foreach (var raw in raws)
             {
-                if (string.IsNullOrWhiteSpace(raw)) 
+                if (string.IsNullOrWhiteSpace(raw))
                     continue;
 
                 var info = MatchContent(NormalizeName(raw), tagMap, plainMap);
-                if (info is null || !info.Show) 
+                if (info is null || !info.Show)
                     continue;
-                if (info.IsFlag) flags.Add(info); 
+                if (info.IsFlag) flags.Add(info);
                 else contents.Add(info);
             }
         }
+
+        private void ExportAtlasGraph()
+        {
+            if (!TryCollectAtlasGraph(out var nodes, out var edges, out var bounds, out var error))
+            {
+                _exportStatusMessage = error;
+                _exportStatusColor = new Vector4(1f, 0.4f, 0.4f, 1f);
+                return;
+            }
+
+            var exportPath = Path.Join(DllDirectory, "config", "atlas-export.html");
+            var directory = Path.GetDirectoryName(exportPath);
+            if (!string.IsNullOrEmpty(directory))
+                Directory.CreateDirectory(directory);
+
+            var html = BuildHtml(nodes, edges, bounds);
+            File.WriteAllText(exportPath, html);
+
+            _exportStatusMessage = $"Exported to {exportPath}";
+            _exportStatusColor = new Vector4(0.4f, 1f, 0.4f, 1f);
+        }
+
+        private bool TryCollectAtlasGraph(out List<NodeExportInfo> nodes,
+            out List<EdgeExport> edges,
+            out RectangleF bounds,
+            out string error)
+        {
+            nodes = [];
+            edges = [];
+            bounds = RectangleF.Empty;
+            error = string.Empty;
+
+            EnsureProcessHandle();
+
+            var atlasUi = GetAtlasPanelUi();
+            if (!atlasUi.IsVisible)
+            {
+                error = "Atlas panel must be visible before exporting.";
+                return false;
+            }
+
+            var panelAddr = GetAtlasPanelAddress();
+            var atlasMap = panelAddr != IntPtr.Zero
+                ? Read<AtlasMapOffsets>(panelAddr)
+                : default;
+
+            bool useVector = TryVectorCount<AtlasNodeEntry>(atlasMap.AtlasNodes, out int vecCount)
+                && vecCount > 0 && vecCount <= 10000;
+            int atlasCount = useVector ? vecCount : atlasUi.Length;
+            if (atlasCount <= 0 || atlasCount > 10000)
+            {
+                error = "Unable to locate atlas nodes.";
+                return false;
+            }
+
+            var gridLookup = new Dictionary<StdTuple2D<int>, NodeExportInfo>();
+            var completed = new HashSet<StdTuple2D<int>>();
+
+            float minX = float.PositiveInfinity;
+            float minY = float.PositiveInfinity;
+            float maxX = float.NegativeInfinity;
+            float maxY = float.NegativeInfinity;
+
+            for (int i = 0; i < atlasCount; i++)
+            {
+                AtlasNode atlasNode;
+                UiElement nodeUi;
+                StdTuple2D<int>? gridPosition = null;
+
+                if (useVector)
+                {
+                    var entry = ReadVectorAt<AtlasNodeEntry>(atlasMap.AtlasNodes, i);
+                    if (entry.UiElementPtr == IntPtr.Zero)
+                        continue;
+
+                    atlasNode = Read<AtlasNode>(entry.UiElementPtr);
+                    nodeUi = Read<UiElement>(entry.UiElementPtr);
+                    gridPosition = entry.GridPosition;
+                }
+                else
+                {
+                    atlasNode = atlasUi.GetAtlasNode(i);
+                    nodeUi = atlasUi.GetChild(i);
+                }
+
+                var mapName = NormalizeName(atlasNode.MapName);
+                if (!IsPrintableUnicode(mapName))
+                    continue;
+
+                if (string.IsNullOrWhiteSpace(mapName))
+                    continue;
+
+                if (Settings.HideCompletedMaps && (atlasNode.IsCompleted || (mapName.EndsWith("Citadel") && AtlasNode.IsFailedAttempt)))
+                    continue;
+
+                if (Settings.HideNotAccessibleMaps && atlasNode.IsNotAccessible)
+                    continue;
+
+                var rawContents = GetContentName(nodeUi);
+                CategorizeContents(rawContents, MapTags, MapPlain, out var flags, out var contents);
+
+                var labels = new List<string>();
+                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                foreach (var info in flags.Concat(contents))
+                {
+                    var label = !string.IsNullOrWhiteSpace(info.Label) ? info.Label : info.Abbrev;
+                    if (string.IsNullOrWhiteSpace(label) || !seen.Add(label))
+                        continue;
+                    labels.Add(label);
+                }
+
+                foreach (var raw in rawContents)
+                {
+                    var normalized = NormalizeName(raw);
+                    if (string.IsNullOrWhiteSpace(normalized) || !seen.Add(normalized))
+                        continue;
+                    labels.Add(normalized);
+                }
+
+                var nodeTopLeft = GetFinalTopLeft(in atlasNode.UiElementBase);
+                var nodeScale = ComputeScalePair(in atlasNode.UiElementBase);
+                var nodeSize = new Vector2(
+                    atlasNode.UiElementBase.UnscaledSize.X * nodeScale.X,
+                    atlasNode.UiElementBase.UnscaledSize.Y * nodeScale.Y);
+
+                var nodeCenter = nodeTopLeft + nodeSize * 0.5f;
+
+                if (Settings.AutoLayout)
+                    nodeCenter += Settings.AnchorNudge;
+                else
+                    nodeCenter += new Vector2(Settings.XSlider - 1500f, Settings.YSlider - 1500f);
+
+                var group = Settings.MapGroups.Find(g => g.Maps.Exists(
+                    m => NormalizeName(m).Equals(mapName, StringComparison.OrdinalIgnoreCase)));
+
+                var backgroundColor = group?.BackgroundColor ?? Settings.DefaultBackgroundColor;
+                var fontColor = group?.FontColor ?? Settings.DefaultFontColor;
+
+                if (atlasNode.IsCompleted)
+                    backgroundColor.W *= 0.6f;
+
+                var infoNode = new NodeExportInfo
+                {
+                    Name = mapName,
+                    Position = nodeCenter,
+                    Size = nodeSize,
+                    IsCompleted = atlasNode.IsCompleted,
+                    IsAccessible = atlasNode.IsAccessible,
+                    Contents = labels,
+                    BackgroundColor = backgroundColor,
+                    FontColor = fontColor
+                };
+
+                nodes.Add(infoNode);
+
+                if (gridPosition.HasValue)
+                {
+                    gridLookup[gridPosition.Value] = infoNode;
+                    if (atlasNode.IsCompleted)
+                        completed.Add(gridPosition.Value);
+                }
+
+                float left = nodeCenter.X - (nodeSize.X * 0.5f);
+                float top = nodeCenter.Y - (nodeSize.Y * 0.5f);
+                float right = nodeCenter.X + (nodeSize.X * 0.5f);
+                float bottom = nodeCenter.Y + (nodeSize.Y * 0.5f);
+
+                minX = Math.Min(minX, left);
+                minY = Math.Min(minY, top);
+                maxX = Math.Max(maxX, right);
+                maxY = Math.Max(maxY, bottom);
+            }
+
+            if (nodes.Count == 0)
+            {
+                error = "No atlas nodes available for export.";
+                return false;
+            }
+
+            bounds = new RectangleF(
+                minX,
+                minY,
+                Math.Max(0f, maxX - minX),
+                Math.Max(0f, maxY - minY));
+
+            if (useVector && TryVectorCount<AtlasNodeConnections>(atlasMap.AtlasNodeConnections, out int connCount)
+                && connCount > 0)
+            {
+                static (int x, int y) XY(StdTuple2D<int> t) => (t.X, t.Y);
+
+                static bool IsCanonical(StdTuple2D<int> a, StdTuple2D<int> b)
+                {
+                    var (ax, ay) = XY(a);
+                    var (bx, by) = XY(b);
+
+                    return (ax < bx) || (ax == bx && ay <= by);
+                }
+
+                for (int i = 0; i < connCount; i++)
+                {
+                    var cn = ReadVectorAt<AtlasNodeConnections>(atlasMap.AtlasNodeConnections, i);
+                    var src = cn.GridPosition;
+
+                    if (!gridLookup.TryGetValue(src, out var from))
+                        continue;
+
+                    var targets = new[] { cn.Connection1, cn.Connection2, cn.Connection3, cn.Connection4 };
+
+                    foreach (var dst in targets)
+                    {
+                        if (dst.Equals(default(StdTuple2D<int>)) || dst.Equals(src))
+                            continue;
+
+                        if (!IsCanonical(src, dst))
+                            continue;
+
+                        if (!gridLookup.TryGetValue(dst, out var to))
+                            continue;
+
+                        if (Settings.GridSkipCompleted && (completed.Contains(src) || completed.Contains(dst)))
+                            continue;
+
+                        edges.Add(new EdgeExport(from.Position, to.Position));
+                    }
+                }
+            }
+
+            return true;
+        }
+
+        private static string BuildHtml(IReadOnlyList<NodeExportInfo> nodes,
+            IReadOnlyList<EdgeExport> edges,
+            RectangleF bounds)
+        {
+            const float margin = 40f;
+            float width = Math.Max(1f, bounds.Width) + margin * 2f;
+            float height = Math.Max(1f, bounds.Height) + margin * 2f;
+
+            float leftOffset = bounds.Left - margin;
+            float topOffset = bounds.Top - margin;
+
+            var sb = new StringBuilder();
+            sb.AppendLine("<!DOCTYPE html>");
+            sb.AppendLine("<html lang=\"en\">");
+            sb.AppendLine("<head>");
+            sb.AppendLine("  <meta charset=\"utf-8\">");
+            sb.AppendLine("  <title>Atlas Export</title>");
+            sb.AppendLine("  <style>");
+            sb.AppendLine("    body { background-color: #0f0f0f; color: #f5f5f5; font-family: 'Segoe UI', Tahoma, sans-serif; }");
+            sb.AppendLine("    .container { position: relative; margin: 24px; }");
+            sb.AppendLine("    .atlas-surface { position: relative; width: 100%; height: 100%; }");
+            sb.AppendLine("    .connections { position: absolute; inset: 0; pointer-events: none; }");
+            sb.AppendLine("    .connections line { stroke: rgba(200, 200, 200, 0.35); stroke-width: 2; }");
+            sb.AppendLine("    .node { position: absolute; transform: translate(-50%, -50%); padding: 6px 10px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.6); min-width: 120px; max-width: 220px; box-shadow: 0 2px 8px rgba(0,0,0,0.45); }");
+            sb.AppendLine("    .node strong { display: block; margin-bottom: 4px; font-size: 14px; }");
+            sb.AppendLine("    .node ul { margin: 4px 0 0; padding-left: 18px; font-size: 12px; }");
+            sb.AppendLine("    .node ul li { margin-bottom: 2px; }");
+            sb.AppendLine("  </style>");
+            sb.AppendLine("</head>");
+            sb.AppendLine("<body>");
+            sb.AppendLine(FormattableString.Invariant($"  <h1>Atlas Export &ndash; {DateTime.Now:G}</h1>"));
+            sb.AppendLine(FormattableString.Invariant($"  <div class=\"container\" style=\"width:{width:F2}px;height:{height:F2}px;\">"));
+            sb.AppendLine("    <div class=\"atlas-surface\">");
+            sb.AppendLine(FormattableString.Invariant($"      <svg class=\"connections\" viewBox=\"0 0 {width:F2} {height:F2}\" xmlns=\"http://www.w3.org/2000/svg\">"));
+
+            foreach (var edge in edges)
+            {
+                float x1 = edge.From.X - leftOffset;
+                float y1 = edge.From.Y - topOffset;
+                float x2 = edge.To.X - leftOffset;
+                float y2 = edge.To.Y - topOffset;
+
+                sb.AppendLine(FormattableString.Invariant($"        <line x1=\"{x1:F2}\" y1=\"{y1:F2}\" x2=\"{x2:F2}\" y2=\"{y2:F2}\" />"));
+            }
+
+            sb.AppendLine("      </svg>");
+
+            foreach (var node in nodes)
+            {
+                float left = node.Position.X - leftOffset;
+                float top = node.Position.Y - topOffset;
+                string background = ToCssColor(node.BackgroundColor);
+                var solidFontColor = node.FontColor;
+                solidFontColor.W = 1f;
+                string font = ToCssColor(solidFontColor);
+                string border = ToCssColor(solidFontColor);
+                string accessibility = node.IsAccessible ? "true" : "false";
+                string completed = node.IsCompleted ? "true" : "false";
+                string title = WebUtility.HtmlEncode(node.Name);
+
+                sb.AppendLine(FormattableString.Invariant($"      <div class=\"node\" style=\"left:{left:F2}px;top:{top:F2}px;background:{background};color:{font};border-color:{border};\" data-name=\"{title}\" data-accessible=\"{accessibility}\" data-completed=\"{completed}\">"));
+                sb.AppendLine(FormattableString.Invariant($"        <strong>{title}</strong>"));
+
+                if (node.Contents.Count > 0)
+                {
+                    sb.AppendLine("        <ul>");
+                    foreach (var content in node.Contents)
+                    {
+                        var encoded = WebUtility.HtmlEncode(content);
+                        sb.AppendLine(FormattableString.Invariant($"          <li>{encoded}</li>"));
+                    }
+                    sb.AppendLine("        </ul>");
+                }
+
+                sb.AppendLine("      </div>");
+            }
+
+            sb.AppendLine("    </div>");
+            sb.AppendLine("  </div>");
+            sb.AppendLine("</body>");
+            sb.AppendLine("</html>");
+
+            return sb.ToString();
+        }
+
+        private static string ToCssColor(Vector4 color)
+        {
+            float r = Math.Clamp(color.X, 0f, 1f) * 255f;
+            float g = Math.Clamp(color.Y, 0f, 1f) * 255f;
+            float b = Math.Clamp(color.Z, 0f, 1f) * 255f;
+            float a = Math.Clamp(color.W, 0f, 1f);
+
+            return FormattableString.Invariant($"rgba({r:F0}, {g:F0}, {b:F0}, {a:F3})");
+        }
+
+        private sealed class NodeExportInfo
+        {
+            public string Name { get; init; }
+            public Vector2 Position { get; init; }
+            public Vector2 Size { get; init; }
+            public bool IsCompleted { get; init; }
+            public bool IsAccessible { get; init; }
+            public List<string> Contents { get; init; } = [];
+            public Vector4 BackgroundColor { get; init; }
+            public Vector4 FontColor { get; init; }
+        }
+
+        private sealed record EdgeExport(Vector2 From, Vector2 To);
 
         public static List<string> GetContentName(UiElement nodeUi)
         {
